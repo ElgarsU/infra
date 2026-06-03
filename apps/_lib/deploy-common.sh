@@ -27,7 +27,10 @@ INVENTORY="$INFRA_ROOT/ansible/inventory.yml"
 GIT_ORG="git@github.com:ElgarsU"
 
 _CLEANUP_DIRS=()
-_cleanup() { for d in "${_CLEANUP_DIRS[@]:-}"; do [ -n "${d:-}" ] && rm -rf "$d"; done; }
+# return 0 explicitly: with `set -e`, an empty _CLEANUP_DIRS makes the final
+# `[ -n "" ]` test return 1, which would otherwise become the script's exit
+# code (false failure for apps with no temp clone, e.g. tracker).
+_cleanup() { local d; for d in "${_CLEANUP_DIRS[@]:-}"; do [ -n "${d:-}" ] && rm -rf "$d"; done; return 0; }
 trap _cleanup EXIT
 
 log()  { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
