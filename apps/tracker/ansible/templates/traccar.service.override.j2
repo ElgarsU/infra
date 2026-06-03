@@ -1,0 +1,34 @@
+# Managed by infra apps/tracker/ansible/playbook.yml.
+# Drop-in override for the bundled /etc/systemd/system/traccar.service.
+# `systemctl cat traccar` shows the merged result.
+
+[Service]
+# MUST override — bundled unit has no User= and runs as root by default.
+User={{ traccar_user }}
+Group={{ traccar_user }}
+
+# Heap sizing for CAX11 (4 GB RAM, shared with Postgres + Node apps).
+# We override ExecStart (not Environment=JAVA_OPTS) because Traccar's
+# bundled unit invokes `java` directly and `java` does not read $JAVA_OPTS.
+# Empty `ExecStart=` clears the inherited value before our replacement.
+# WorkingDirectory=/opt/traccar is inherited from the bundled unit.
+#
+# -Duser.timezone={{ traccar_timezone }}: run the JVM in Riga local time so
+# Traccar's log timestamps AND the servertime it writes to tc_positions are
+# Riga-local, matching the VPS wall clock. WITHOUT this, Traccar runs in UTC
+# (EEST-3) and every log line / DB timestamp needs a mental +3h conversion.
+# NOTE: tc_positions.servertime is stored as Riga-local, NOT UTC. Changing
+# this flag later creates a one-time discontinuity in stored timestamps.
+ExecStart=
+ExecStart={{ traccar_app_dir }}/jre/bin/java -Xms128m -Xmx{{ traccar_jvm_max_heap_mb }}m -Duser.timezone={{ traccar_timezone }} -jar tracker-server.jar conf/traccar.xml
+
+# JVM defaults to writing user prefs under $HOME/.java/ — point at data dir
+# so it stays inside ReadWritePaths.
+Environment=HOME={{ traccar_data_dir }}
+
+# Sandboxing — same flags as husky.service.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ traccar_data_dir }} {{ traccar_logs_dir }} {{ traccar_app_dir }}/override

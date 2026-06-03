@@ -1,0 +1,19 @@
+# Managed by infra apps/tet-fit/ansible/playbook.yml.
+[Unit]
+Description=TET Training Nuxt App
+After=network.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+WorkingDirectory={{ app_dir }}
+EnvironmentFile={{ app_dir }}/.env
+ExecStart=/usr/bin/node .output/server/index.mjs
+Restart=always
+RestartSec=5
+Environment=PORT={{ fit_internal_port }}
+Environment=HOST=127.0.0.1
+Environment=STATE_DIR={{ data_dir }}
+
+[Install]
+WantedBy=multi-user.target

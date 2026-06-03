@@ -1,0 +1,774 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Traccar (tracker) app play.
+#
+#   ../../deploy.sh tracker        (from the infra repo root)
+#
+# Idempotent. Re-running:
+#   • Skips Traccar download if the pinned SHA256 matches what's on disk
+#   • Skips admin-user replacement after the marker file is created
+#   • SQL is INSERT…WHERE NOT EXISTS — no duplicate rows
+#
+# Depends on the base roles (run ./setup.sh, or ansible/site.yml first):
+#   • postgres role — Postgres installed + localhost-bound (this play creates
+#                     the traccar DB/role inside it)
+#   • caddy role    — cloudflare.env + security_headers snippet + sites.d/
+#
+# Secrets come from secrets/tracker.env via the environment (deploy.sh exports
+# them). NO secrets are stored in this repo's tracked files.
+#
+# Build model: NONE. Traccar is a vendored upstream release fetched + verified
+# ON THE VPS (pinned version + SHA256). This is the one app whose artifact is
+# fetched server-side rather than built from a repo + copied. See
+# docs/build-sh-contract.md § "tracker (the exception)".
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Traccar (tracker)
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+
+    # ── Secrets (from the environment — secrets/tracker.env) ─────────────
+    postgres_traccar_password: "{{ lookup('env', 'POSTGRES_TRACCAR_PASSWORD') }}"
+    traccar_admin_username:     "{{ lookup('env', 'TRACCAR_ADMIN_USERNAME') }}"
+    traccar_admin_password:     "{{ lookup('env', 'TRACCAR_ADMIN_PASSWORD') }}"
+    pushover_user:              "{{ lookup('env', 'PUSHOVER_USER') | default('PASTE', true) }}"
+    pushover_token:             "{{ lookup('env', 'PUSHOVER_TOKEN') | default('PASTE', true) }}"
+    husky_traccar_username:     "{{ lookup('env', 'HUSKY_TRACCAR_USERNAME') }}"
+    husky_traccar_password:     "{{ lookup('env', 'HUSKY_TRACCAR_PASSWORD') }}"
+
+    # ── Traccar version pinning ─────────────────────────────────────────
+    # Upgrade procedure (one commit):
+    #   1. Bump traccar_version below.
+    #   2. Refresh traccar_sha256 — query GitHub release assets:
+    #        gh release view v<NEW> --repo traccar/traccar --json assets \
+    #          | jq -r '.assets[] | select(.name == "traccar-linux-arm-<NEW>.zip") | .digest' \
+    #          | sed 's/^sha256://'
+    #   3. Re-run ./deploy.sh tracker — the play re-downloads, validates the
+    #      hash, stops+replaces traccar.service, and brings it back up.
+    traccar_version: "6.13.3"
+    traccar_sha256:  "02736bb040bc5aca898970867d898140cdc28e6fe8051dcac675228d5a4a287c"
+
+    # ── Traccar runtime layout ──────────────────────────────────────────
+    traccar_user: traccar
+    traccar_app_dir: /opt/traccar              # release ZIP unpacks here verbatim
+    traccar_data_dir: /opt/traccar/data
+    traccar_logs_dir: /opt/traccar/logs
+    traccar_web_address: 127.0.0.1
+    traccar_web_port: 8082
+    traccar_device_port: 5027                  # Teltonika protocol (key: teltonika.port)
+    traccar_device_source_ranges: []           # [] = open to world (rate-limited); populate to narrow
+    traccar_jvm_max_heap_mb: 768               # CAX11 has 4 GB total — share with Postgres + Node apps
+    traccar_timezone: "Europe/Riga"            # JVM -Duser.timezone — makes logs + tc_positions.servertime Riga-local, NOT UTC
+    traccar_domain: track.elgars.eu            # web UI (orange-cloud, Caddy)
+    traccar_device_domain: gps.elgars.eu       # FMC880 dial-in (gray-cloud, raw TCP) — informational
+
+    # ── Postgres (shared instance, provided by the base postgres role) ──
+    postgres_listen_address: 127.0.0.1
+    postgres_traccar_db: traccar
+    postgres_traccar_user: traccar
+
+    # ── Device + computed attributes (Traccar config stored in Postgres) ──
+    # Full writeup + the CRITICAL attributes.get() gotcha live in
+    # docs/fmc-and-traccar-config.md (kept in the enduro-tracking repo).
+    traccar_device_imei: "862129081248340"     # FMC880 IMEI — stable device identity
+    traccar_device_name: "Husqvarna FE350"
+    traccar_computed_attributes:
+      # ⚠️  DO NOT rewrite these as attributes.get("ioNNN") != null && ... — that
+      #     "null-safe" form silences a harmless WARN ("variable 'ioNNN' is
+      #     undefined") but BREAKS alarm evaluation in Traccar 6.13.3 (the alarm
+      #     never fires). The bare `ioNNN == 1 ? ... : null` form WORKS and is
+      #     the ONLY form that works. The per-record WARN noise is accepted.
+      #     See docs/fmc-and-traccar-config.md before touching these.
+      - description: "Power cut"
+        attribute: alarm
+        type: string
+        expression: 'io252 == 1 ? "powerCut" : null'
+      - description: "Bike moved"
+        attribute: alarm
+        type: string
+        expression: 'io246 == 1 ? "tow" : null'
+
+    # ── Alarm → Pushover notification rules (Traccar config in Postgres) ──
+    # Maintained in the Traccar UI; the play MIRRORS them for a fresh rebuild.
+    # Insert-if-absent keyed on `description`, so it NEVER overwrites a UI edit.
+    # Only applied when Pushover is configured.
+    traccar_notifications:
+      - description: "Bike power disconnected"
+        type: alarm
+        notificators: pushover
+        always: true
+        attributes:
+          alarms: powerCut
+          priority: true
+      - description: "Bike moved"
+        type: alarm
+        notificators: pushover
+        always: true
+        attributes:
+          alarms: tow
+          priority: true
+
+  # ── Preconditions ─────────────────────────────────────────────────────
+  pre_tasks:
+
+    - name: Assert architecture is ARM64 (Hetzner CAX)
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+        fail_msg: "This app targets ARM64. Detected: {{ ansible_architecture }}."
+
+    - name: Assert OS is Ubuntu 24.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: >-
+          Pinned to Ubuntu 24.04. Detected:
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env, Postgres)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+        - /etc/systemd/system/multi-user.target.wants/postgresql.service
+
+    - name: Assert base roles have run (site.yml / setup.sh)
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists   # caddy snippet
+          - base_infra.results[1].stat.exists   # cloudflare.env
+        fail_msg: >-
+          Shared infra missing. Run the base provisioning first:
+          `./setup.sh` (fresh VPS) or
+          `cd ansible && ansible-playbook site.yml`. It installs the Caddy
+          snippets + cloudflare-dns plugin + cloudflare.env, Postgres, the
+          enduro-data group, fail2ban, and the CF-IP ufw rules this app needs.
+
+    - name: Validate secrets are filled in (from secrets/tracker.env)
+      ansible.builtin.assert:
+        that:
+          - postgres_traccar_password | length > 0
+          - "'PASTE' not in postgres_traccar_password"
+          - traccar_admin_username | length > 0
+          - traccar_admin_password | length > 0
+          - "'PASTE' not in traccar_admin_password"
+          - husky_traccar_username | length > 0
+          - husky_traccar_password | length > 0
+          - "'PASTE' not in husky_traccar_password"
+        fail_msg: >-
+          secrets/tracker.env is missing values or still has PASTE_
+          placeholders (postgres / traccar admin / husky traccar).
+
+  tasks:
+
+    # ── Postgres traccar DB/role (server provided by base postgres role) ──
+    - name: Create traccar Postgres role
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ postgres_traccar_user }}"
+        password: "{{ postgres_traccar_password }}"
+        encrypted: true
+        state: present
+
+    - name: Create traccar database (owned by traccar role)
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ postgres_traccar_db }}"
+        owner: "{{ postgres_traccar_user }}"
+        state: present
+
+    - name: Smoke test — traccar role can connect to traccar DB over TCP
+      become_user: postgres
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: "SELECT current_user AS u, current_database() AS d"
+      register: pg_smoke
+      changed_when: false
+
+    # ── Traccar app: user, install, config, systemd ──────────────────────
+
+    - name: Install unzip (Traccar release archive)
+      ansible.builtin.apt:
+        name: unzip
+        state: present
+        update_cache: false
+
+    - name: Create traccar system user
+      ansible.builtin.user:
+        name: "{{ traccar_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ traccar_app_dir }}"
+        create_home: false
+
+    - name: Ensure /opt/traccar exists
+      ansible.builtin.file:
+        path: "{{ traccar_app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Traccar ARM64 release (cached by version + sha256-verified)
+      ansible.builtin.get_url:
+        url: "https://github.com/traccar/traccar/releases/download/v{{ traccar_version }}/traccar-linux-arm-{{ traccar_version }}.zip"
+        dest: "/tmp/traccar-{{ traccar_version }}.zip"
+        checksum: "sha256:{{ traccar_sha256 }}"
+        force: false
+        mode: "0644"
+
+    - name: Check whether this Traccar version is already installed
+      ansible.builtin.stat:
+        path: "{{ traccar_app_dir }}/.installed-version-{{ traccar_version }}"
+      register: traccar_version_marker
+
+    # Stops traccar before overwriting the jar on a version bump. failed_when:false
+    # makes the first install (no service unit yet) a no-op instead of an error.
+    - name: Stop traccar before re-unpack (no-op on first install)
+      ansible.builtin.systemd:
+        name: traccar
+        state: stopped
+      when: not traccar_version_marker.stat.exists
+      failed_when: false
+
+    # The GitHub ZIP contains only a Makeself self-extracting installer
+    # (traccar.run + README.txt). The actual JRE / jar / conf / lib live
+    # inside traccar.run. We extract the outer ZIP, then run traccar.run
+    # with `--noexec --target` to extract its payload without invoking the
+    # embedded installer (which would install its own systemd unit).
+    - name: Unpack outer ZIP (contains traccar.run installer)
+      ansible.builtin.unarchive:
+        src: "/tmp/traccar-{{ traccar_version }}.zip"
+        dest: "{{ traccar_app_dir }}"
+        remote_src: true
+      when: not traccar_version_marker.stat.exists
+
+    - name: Extract traccar.run payload (Makeself --noexec)
+      ansible.builtin.command:
+        cmd: "{{ traccar_app_dir }}/traccar.run --noexec --target {{ traccar_app_dir }}"
+      register: traccar_extract
+      changed_when: true
+      when: not traccar_version_marker.stat.exists
+
+    # Written LAST in the extract sequence — if either step above fails,
+    # the marker stays absent and the next run does a full re-extract.
+    - name: Mark this Traccar version as installed
+      ansible.builtin.copy:
+        content: "{{ traccar_version }}\n"
+        dest: "{{ traccar_app_dir }}/.installed-version-{{ traccar_version }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not traccar_version_marker.stat.exists
+
+    # /opt/traccar/override is for custom web-UI overlays. Traccar's Jetty
+    # writes here on startup even when empty — must exist + be writable.
+    - name: Ensure traccar-writable directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ traccar_user }}"
+        group: "{{ traccar_user }}"
+        mode: "0750"
+      loop:
+        - "{{ traccar_data_dir }}"
+        - "{{ traccar_logs_dir }}"
+        - "{{ traccar_app_dir }}/override"
+
+    - name: Render conf/traccar.xml
+      ansible.builtin.template:
+        src: traccar.xml.j2
+        dest: "{{ traccar_app_dir }}/conf/traccar.xml"
+        owner: root
+        group: "{{ traccar_user }}"
+        mode: "0640"
+      notify: restart traccar
+
+    - name: Install Traccar systemd unit (bundled, verbatim from release)
+      ansible.builtin.copy:
+        src: "{{ traccar_app_dir }}/traccar.service"
+        dest: /etc/systemd/system/traccar.service
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart traccar
+
+    - name: Ensure systemd drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/traccar.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render systemd drop-in override (User=traccar + heap + sandboxing)
+      ansible.builtin.template:
+        src: traccar.service.override.j2
+        dest: /etc/systemd/system/traccar.service.d/override.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart traccar
+
+    - name: Enable and start traccar
+      ansible.builtin.systemd:
+        name: traccar
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # Run queued handlers BEFORE the health check, so we poll the freshly
+    # restarted service rather than whatever was running before this play.
+    - name: Apply any pending traccar restarts before health check
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for Traccar web API to respond
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ traccar_web_port }}/api/server"
+        status_code: 200
+      register: traccar_health
+      retries: 30
+      delay: 2
+      until: traccar_health.status == 200
+
+    # ── Bootstrap personal admin via direct SQL ──────────────────────────
+    # Traccar v6 does NOT auto-create a default admin/admin on fresh Postgres
+    # installs. The API /api/users POST has a latent first-user NPE in v6.13.3.
+    # So we INSERT the personal admin directly.
+    # Hash format from src/main/java/org/traccar/helper/Hashing.java (v6.13.3):
+    #   PBKDF2WithHmacSHA1, 1000 iterations, 24-byte salt + 24-byte hash.
+    # Computed on the control node so plaintext never leaves the laptop.
+    # "Eliminate default admin/admin" is automatic: v6 never creates it.
+
+    - name: Check admin-bootstrap marker
+      ansible.builtin.stat:
+        path: "{{ traccar_data_dir }}/.admin-replaced"
+      register: admin_marker
+
+    - name: Bootstrap personal admin
+      when: not admin_marker.stat.exists
+      block:
+
+        - name: Compute PBKDF2 hash + salt for admin password (on control node)
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - |
+                import hashlib, os, binascii, sys
+                password = sys.argv[1]
+                salt = os.urandom(24)
+                digest = hashlib.pbkdf2_hmac('sha1', password.encode(), salt, 1000, 24)
+                print(binascii.hexlify(salt).decode())
+                print(binascii.hexlify(digest).decode())
+              - "{{ traccar_admin_password }}"
+          delegate_to: localhost
+          become: false
+          register: pbkdf_out
+          changed_when: false
+          no_log: true
+
+        - name: Check whether the personal admin already exists in tc_users
+          community.postgresql.postgresql_query:
+            db: "{{ postgres_traccar_db }}"
+            login_user: "{{ postgres_traccar_user }}"
+            login_password: "{{ postgres_traccar_password }}"
+            login_host: "{{ postgres_listen_address }}"
+            query: "SELECT id FROM tc_users WHERE email = %s"
+            positional_args:
+              - "{{ traccar_admin_username }}"
+          register: existing_admin
+
+        - name: Insert personal admin into tc_users
+          community.postgresql.postgresql_query:
+            db: "{{ postgres_traccar_db }}"
+            login_user: "{{ postgres_traccar_user }}"
+            login_password: "{{ postgres_traccar_password }}"
+            login_host: "{{ postgres_listen_address }}"
+            query: |
+              INSERT INTO tc_users (name, email, hashedpassword, salt, administrator)
+              VALUES (%s, %s, %s, %s, true)
+            positional_args:
+              - "{{ traccar_admin_username }}"
+              - "{{ traccar_admin_username }}"
+              - "{{ pbkdf_out.stdout_lines[1] }}"
+              - "{{ pbkdf_out.stdout_lines[0] }}"
+          when: existing_admin.query_result | length == 0
+          no_log: true
+
+        - name: Verify personal admin can log in via Traccar API
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ traccar_web_port }}/api/session"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              email: "{{ traccar_admin_username }}"
+              password: "{{ traccar_admin_password }}"
+            status_code: 200
+          no_log: true
+
+        - name: Touch admin-bootstrap marker
+          ansible.builtin.copy:
+            content: "{{ ansible_date_time.iso8601 }}\n"
+            dest: "{{ traccar_data_dir }}/.admin-replaced"
+            owner: "{{ traccar_user }}"
+            group: "{{ traccar_user }}"
+            mode: "0600"
+
+    # ── Device + computed alarm attributes (idempotent SQL) ──────────────
+    - name: Ensure FMC880 device is registered (idempotent on uniqueid)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_devices (name, uniqueid)
+          SELECT %s, %s
+          WHERE NOT EXISTS (SELECT 1 FROM tc_devices WHERE uniqueid = %s);
+        positional_args:
+          - "{{ traccar_device_name }}"
+          - "{{ traccar_device_imei }}"
+          - "{{ traccar_device_imei }}"
+
+    - name: Ensure computed alarm attributes exist (idempotent on description)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_attributes (description, type, attribute, expression)
+          SELECT %s, %s, %s, %s
+          WHERE NOT EXISTS (SELECT 1 FROM tc_attributes WHERE description = %s);
+        positional_args:
+          - "{{ item.description }}"
+          - "{{ item.type }}"
+          - "{{ item.attribute }}"
+          - "{{ item.expression }}"
+          - "{{ item.description }}"
+      loop: "{{ traccar_computed_attributes }}"
+      loop_control:
+        label: "{{ item.description }}"
+
+    - name: Link computed attributes to the device (idempotent on deviceid+attributeid)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_device_attribute (deviceid, attributeid)
+          SELECT d.id, a.id
+          FROM tc_devices d
+          JOIN tc_attributes a ON a.description = %s
+          WHERE d.uniqueid = %s
+            AND NOT EXISTS (
+              SELECT 1 FROM tc_device_attribute da
+              WHERE da.deviceid = d.id AND da.attributeid = a.id
+            );
+        positional_args:
+          - "{{ item.description }}"
+          - "{{ traccar_device_imei }}"
+      loop: "{{ traccar_computed_attributes }}"
+      loop_control:
+        label: "{{ item.description }}"
+
+    # ── Alarm → Pushover notification rules (idempotent SQL) ─────────────
+    # notificator.types MUST include 'pushover' (set in traccar.xml.j2) or
+    # NotificatorManager throws at alarm time — see that template's comment.
+    - name: Determine whether Pushover is configured
+      ansible.builtin.set_fact:
+        pushover_enabled: >-
+          {{ pushover_user is defined and 'PASTE' not in pushover_user
+             and pushover_token is defined and 'PASTE' not in pushover_token }}
+
+    - name: Ensure alarm→Pushover notification rules exist (idempotent on description)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_notifications (type, notificators, always, attributes, description)
+          SELECT %s, %s, %s::boolean, %s, %s
+          WHERE NOT EXISTS (
+            SELECT 1 FROM tc_notifications WHERE description = %s
+          );
+        positional_args:
+          - "{{ item.type }}"
+          - "{{ item.notificators }}"
+          - "{{ item.always | string | lower }}"
+          - "{{ item.attributes | to_json }}"
+          - "{{ item.description }}"
+          - "{{ item.description }}"
+      loop: "{{ traccar_notifications }}"
+      loop_control:
+        label: "{{ item.description }}"
+      when: pushover_enabled | bool
+
+    - name: Link notification rules to the admin user (idempotent)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_user_notification (userid, notificationid)
+          SELECT u.id, n.id
+          FROM tc_users u
+          JOIN tc_notifications n ON n.description = %s
+          WHERE u.email = %s
+            AND NOT EXISTS (
+              SELECT 1 FROM tc_user_notification un
+              WHERE un.userid = u.id AND un.notificationid = n.id
+            );
+        positional_args:
+          - "{{ item.description }}"
+          - "{{ traccar_admin_username }}"
+      loop: "{{ traccar_notifications }}"
+      loop_control:
+        label: "{{ item.description }}"
+      when: pushover_enabled | bool
+
+    # ── Husky API Traccar user (read-only, linked to device) ─────────────
+    # Dedicated read-only account the husky maintenance app uses to read
+    # positions / engine hours. PBKDF2 hash computed on the control node;
+    # idempotent INSERT keyed on email. The husky_traccar_api_token in
+    # secrets/tracker.env is OPERATOR-MANAGED (Traccar UI) — not touched here.
+    - name: Compute PBKDF2 hash + salt for the Husky Traccar password (control node)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import hashlib, os, binascii, sys
+            password = sys.argv[1]
+            salt = os.urandom(24)
+            digest = hashlib.pbkdf2_hmac('sha1', password.encode(), salt, 1000, 24)
+            print(binascii.hexlify(salt).decode())
+            print(binascii.hexlify(digest).decode())
+          - "{{ husky_traccar_password }}"
+      delegate_to: localhost
+      become: false
+      register: husky_pbkdf
+      changed_when: false
+      no_log: true
+
+    - name: Check if Traccar husky user already exists
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: "SELECT id FROM tc_users WHERE email = %s"
+        positional_args:
+          - "{{ husky_traccar_username }}"
+      register: existing_husky_user
+
+    - name: Create Traccar husky user (administrator=false, readonly=true)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_users (name, email, hashedpassword, salt, administrator, readonly)
+          VALUES (%s, %s, %s, %s, false, true)
+        positional_args:
+          - "{{ husky_traccar_username }}"
+          - "{{ husky_traccar_username }}"
+          - "{{ husky_pbkdf.stdout_lines[1] }}"
+          - "{{ husky_pbkdf.stdout_lines[0] }}"
+      when: existing_husky_user.query_result | length == 0
+      no_log: true
+
+    - name: Link Traccar husky user to the device (idempotent)
+      community.postgresql.postgresql_query:
+        db: "{{ postgres_traccar_db }}"
+        login_user: "{{ postgres_traccar_user }}"
+        login_password: "{{ postgres_traccar_password }}"
+        login_host: "{{ postgres_listen_address }}"
+        query: |
+          INSERT INTO tc_user_device (userid, deviceid)
+          SELECT u.id, d.id
+          FROM tc_users u
+          JOIN tc_devices d ON d.uniqueid = %s
+          WHERE u.email = %s
+            AND NOT EXISTS (
+              SELECT 1 FROM tc_user_device ud
+              WHERE ud.userid = u.id AND ud.deviceid = d.id
+            );
+        positional_args:
+          - "{{ traccar_device_imei }}"
+          - "{{ husky_traccar_username }}"
+
+    # ── Caddy site for track.elgars.eu ───────────────────────────────────
+    - name: Check whether tracker Caddy site already exists
+      ansible.builtin.stat:
+        path: /etc/caddy/sites.d/track.elgars.eu.caddy
+      register: tracker_site_stat
+
+    - name: Snapshot current tracker site config (for rollback on validate failure)
+      ansible.builtin.copy:
+        src: /etc/caddy/sites.d/track.elgars.eu.caddy
+        dest: "/etc/caddy/sites.d/track.elgars.eu.caddy.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+      when: tracker_site_stat.stat.exists
+
+    - name: Render track.elgars.eu site config
+      ansible.builtin.template:
+        src: caddy.track.j2
+        dest: /etc/caddy/sites.d/track.elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: tracker_site_change
+
+    - name: Validate Caddy config + reload (rollback tracker site on failure)
+      when: tracker_site_change.changed
+      block:
+        - name: caddy validate (with CF env loaded)
+          ansible.builtin.shell:
+            cmd: |
+              set -a
+              # shellcheck disable=SC1091
+              source /etc/caddy/cloudflare.env
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Reload caddy
+          ansible.builtin.systemd:
+            name: caddy
+            state: reloaded
+      rescue:
+        - name: Restore previous tracker site config (or remove on first install)
+          ansible.builtin.shell: |
+            set -e
+            latest=$(ls -1t /etc/caddy/sites.d/track.elgars.eu.caddy.bak-* 2>/dev/null | head -1)
+            if [ -n "$latest" ]; then
+              cp "$latest" /etc/caddy/sites.d/track.elgars.eu.caddy
+              echo "Restored tracker site from $latest"
+            else
+              rm -f /etc/caddy/sites.d/track.elgars.eu.caddy
+              echo "Removed new tracker site (no prior version)"
+            fi
+          changed_when: true
+
+        - name: Abort — Caddy validation failed
+          ansible.builtin.fail:
+            msg: |
+              Caddy config did not validate after rendering caddy.track.j2.
+              Tracker site file was restored (or removed on first install).
+
+    # ── ufw rule for Traccar device port (5027/tcp) ──────────────────────
+    - name: ufw rate-limit 5027/tcp from world (when no source ranges specified)
+      community.general.ufw:
+        rule: limit
+        port: "5027"
+        proto: tcp
+        comment: "TRACCAR-DEVICE"
+      when: traccar_device_source_ranges | length == 0
+
+    - name: ufw allow 5027/tcp from specified source ranges
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item }}"
+        to_port: "5027"
+        comment: "TRACCAR-DEVICE"
+      loop: "{{ traccar_device_source_ranges }}"
+      when: traccar_device_source_ranges | length > 0
+
+    - name: Remove open 5027/tcp limit rule when source ranges are configured
+      community.general.ufw:
+        rule: limit
+        port: "5027"
+        proto: tcp
+        delete: true
+      when: traccar_device_source_ranges | length > 0
+      failed_when: false
+
+    # ── Verification + summary ───────────────────────────────────────────
+    - name: Snapshot listening TCP ports
+      ansible.builtin.command:
+        cmd: ss -tlnH
+      changed_when: false
+      check_mode: false          # read-only; must run under --check so the asserts below have data
+      register: ss_out
+
+    - name: Assert Traccar tracker port 5027 listens on all interfaces
+      ansible.builtin.assert:
+        that:
+          - "':5027' in ss_out.stdout"
+          - ('0.0.0.0:5027' in ss_out.stdout) or ('*:5027' in ss_out.stdout)
+        fail_msg: |-
+          Port 5027 is not listening on 0.0.0.0.
+          ss output:
+          {{ ss_out.stdout }}
+
+    # Java's NIO dual-stack defaults render web.address=127.0.0.1 as
+    # [::ffff:127.0.0.1]:8082 in ss output. Either means localhost-only.
+    - name: Assert Traccar web port 8082 is bound to localhost only
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('127.0.0.1:8082' in ss_out.stdout)
+            or ('[::ffff:127.0.0.1]:8082' in ss_out.stdout)
+            or ('[::1]:8082' in ss_out.stdout)
+          - "'0.0.0.0:8082' not in ss_out.stdout"
+          - "'*:8082' not in ss_out.stdout"
+        fail_msg: |-
+          Port 8082 is not bound to localhost only — Traccar web UI is exposed.
+          ss output:
+          {{ ss_out.stdout }}
+
+    - name: Assert Postgres 5432 is bound to localhost only
+      ansible.builtin.assert:
+        that:
+          - "'127.0.0.1:5432' in ss_out.stdout"
+          - "'0.0.0.0:5432' not in ss_out.stdout"
+        fail_msg: |-
+          Postgres is exposed beyond 127.0.0.1.
+          ss output:
+          {{ ss_out.stdout }}
+
+    - name: Phase 1 setup summary
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════════════════════════"
+          - "Traccar (tracker) deploy complete."
+          - ""
+          - "Web UI:      https://{{ traccar_domain }}"
+          - "Admin user:  {{ traccar_admin_username }}"
+          - "Version:     {{ traccar_version }}  (sha256 {{ traccar_sha256 }})"
+          - "Device ingress: {{ traccar_device_domain }}:{{ traccar_device_port }}  (raw TCP)"
+          - ""
+          - "OUT-OF-BAND PREREQUISITES (cannot be automated):"
+          - "  • Hetzner cloud firewall: TCP/{{ traccar_device_port }} inbound 0.0.0.0/0"
+          - "  • Cloudflare DNS: {{ traccar_domain }} (orange) + {{ traccar_device_domain }} (gray) → 89.167.98.246"
+          - "═══════════════════════════════════════════════════════════════"
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart traccar
+      ansible.builtin.systemd:
+        name: traccar
+        state: restarted

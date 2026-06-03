@@ -1,0 +1,39 @@
+#!/bin/bash
+# Managed by the infra `common` role.
+# Refresh ufw rules so 80/443 are only reachable from Cloudflare IPs.
+# Re-run monthly via /etc/cron.monthly/. Idempotent. Adds new rules
+# before deleting old ones, so a transient failure can't lock you out.
+
+set -euo pipefail
+
+MARK="CF-MANAGED"
+LOG_TAG="cf-ufw-update"
+
+log() { logger -t "$LOG_TAG" -- "$*"; echo "$*"; }
+
+# Fetch latest CF IP ranges (fail fast if network is wonky — don't touch ufw)
+cf_ipv4=$(curl -fsS --max-time 15 https://www.cloudflare.com/ips-v4 | sed '/^$/d')
+cf_ipv6=$(curl -fsS --max-time 15 https://www.cloudflare.com/ips-v6 | sed '/^$/d')
+
+if [ -z "$cf_ipv4" ] || [ -z "$cf_ipv6" ]; then
+    log "ERROR: failed to fetch Cloudflare IP ranges — aborting"
+    exit 1
+fi
+
+log "Adding CF-managed rules…"
+for ip in $cf_ipv4 $cf_ipv6; do
+    ufw allow proto tcp from "$ip" to any port 80  comment "$MARK" >/dev/null || true
+    ufw allow proto tcp from "$ip" to any port 443 comment "$MARK" >/dev/null || true
+done
+
+log "Removing any unrestricted 80/443 rules…"
+# Iterate twice (once for v4, once for v6 if they exist as separate "open to all" rules)
+for _ in 1 2; do
+    while ufw status | grep -qE '^(80|443)/tcp +ALLOW +Anywhere'; do
+        ufw --force delete allow 80/tcp 2>/dev/null || true
+        ufw --force delete allow 443/tcp 2>/dev/null || true
+    done
+done
+
+ufw reload
+log "CF ufw rules refreshed."

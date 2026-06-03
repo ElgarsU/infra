@@ -1,0 +1,52 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Base VPS provisioning — the shared foundation every app depends on.
+#
+#   cd ansible && ansible-playbook site.yml
+#   (or, from the repo root: ./setup.sh   — which runs this THEN every app)
+#
+# Idempotent. Safe to re-run any time. Roles run in dependency order:
+#   common   — packages (incl. Node 20), enduro-data group, fail2ban, sshd
+#              hardening, unattended-upgrades, ufw posture (SSH + CF-only 80/443)
+#   caddy    — cloudflare-dns plugin, cloudflare.env, sites.d/snippets layout,
+#              shared security_headers snippet, imports-only Caddyfile
+#   postgres — shared PostgreSQL instance, bound to localhost (apps own their DBs)
+#
+# Reads CF_API_TOKEN from the environment (exported by setup.sh from
+# secrets/common.env). No secrets are stored in this repo's tracked files.
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Base VPS provisioning (common + caddy + postgres)
+  hosts: vps
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert architecture is ARM64 (Hetzner CAX11)
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+        fail_msg: "This infra targets ARM64. Detected: {{ ansible_architecture }}."
+
+    - name: Assert OS is Ubuntu 24.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: >-
+          Pinned to Ubuntu 24.04. Detected:
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+    - name: Assert CF_API_TOKEN is present in the environment
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'CF_API_TOKEN') | length > 20
+          - "'PASTE' not in lookup('env', 'CF_API_TOKEN')"
+        fail_msg: >-
+          CF_API_TOKEN is missing or a placeholder. Populate secrets/common.env
+          (copy from secrets/common.env.example) before running setup.sh.
+
+  roles:
+    - common
+    - caddy
+    - postgres

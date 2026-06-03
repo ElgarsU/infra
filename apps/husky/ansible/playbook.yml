@@ -1,0 +1,300 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Husky app play — Nuxt 4 SSR maintenance log + live Traccar dashboard.
+#
+#   ../../deploy.sh husky        (from the infra repo root)
+#
+# Merges the old setup.yml (user/dirs/.env/unit/Caddy site) and deploy.yml
+# (rsync source → build on host → restart) into one idempotent play.
+#
+# Why build on the host: husky uses better-sqlite3 (native .node binary). A
+# Mac-built artifact won't load on Linux, so `npm ci` + `npm run build` run
+# ON THE VPS. build.sh (in the husky repo) only STAGES clean source into dist/.
+#
+# Depends on:
+#   • base roles (common): Node 20, build-essential+python3, enduro-data group
+#   • base roles (caddy):  cloudflare.env + security_headers snippet + sites.d/
+#   • tracker: the read-only Traccar user husky logs in as
+# Secrets from the environment: HUSKY_AUTH_* / HUSKY_SESSION_PASSWORD /
+# HUSKY_TRACCAR_URL / HUSKY_TRACCAR_DEVICE_ID (secrets/husky.env) and
+# HUSKY_TRACCAR_USERNAME / _PASSWORD / _API_TOKEN (secrets/tracker.env, shared).
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Husky
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    # ── Secrets (from the environment) ──────────────────────────────────
+    husky_auth_username:      "{{ lookup('env', 'HUSKY_AUTH_USERNAME') }}"
+    husky_auth_password_hash: "{{ lookup('env', 'HUSKY_AUTH_PASSWORD_HASH') }}"
+    husky_session_password:   "{{ lookup('env', 'HUSKY_SESSION_PASSWORD') }}"
+    husky_traccar_url:        "{{ lookup('env', 'HUSKY_TRACCAR_URL') }}"
+    husky_traccar_username:   "{{ lookup('env', 'HUSKY_TRACCAR_USERNAME') }}"
+    husky_traccar_password:   "{{ lookup('env', 'HUSKY_TRACCAR_PASSWORD') }}"
+    husky_traccar_api_token:  "{{ lookup('env', 'HUSKY_TRACCAR_API_TOKEN') | default('', true) }}"
+    husky_traccar_device_id:  "{{ lookup('env', 'HUSKY_TRACCAR_DEVICE_ID') }}"
+
+    husky_app_dir: /opt/husky
+    husky_data_dir: /opt/husky/data
+    husky_user: husky
+    husky_internal_port: 3001
+    enduro_data_group: enduro-data
+
+  pre_tasks:
+    - name: Assert OS is Ubuntu 24.04 ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "Pinned to Ubuntu 24.04 ARM64."
+
+    - name: Assert staged source was passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - (dist_dir ~ '/package.json') is file
+        fail_msg: >-
+          Staged source not found at {{ dist_dir | default('(unset)') }}.
+          Run via ./deploy.sh husky (clones husky, runs build.sh, passes dist_dir).
+      delegate_to: localhost
+      become: false
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+
+    - name: Assert base roles + Node have run
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists
+          - base_infra.results[1].stat.exists
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first — needs Caddy base + Node 20."
+
+    - name: Validate secrets are filled in
+      ansible.builtin.assert:
+        that:
+          - husky_auth_password_hash | length > 0
+          - "'PASTE' not in husky_auth_password_hash"
+          - husky_session_password | length > 0
+          - "'PASTE' not in husky_session_password"
+          - husky_traccar_url | length > 8
+          - husky_traccar_username | length > 0
+          - husky_traccar_password | length > 0
+          - "'PASTE' not in husky_traccar_password"
+          - husky_traccar_device_id | string | length > 0
+        fail_msg: >-
+          Missing values. HUSKY_AUTH_*/SESSION/TRACCAR_URL/DEVICE_ID come from
+          secrets/husky.env; HUSKY_TRACCAR_USERNAME/_PASSWORD from
+          secrets/tracker.env (shared). Fill both in.
+
+  tasks:
+    # ════════════════════════════════════════════════════════════════════
+    # [BOOTSTRAP] user, directories, config, systemd unit, Caddy site
+    # ════════════════════════════════════════════════════════════════════
+
+    # enduro-data group is created by the common role. husky joins it for rw
+    # access to /var/lib/sentry/state.db. append:true is CRITICAL — without it
+    # the next deploy would WIPE the membership.
+    - name: Create husky system user (member of enduro-data for SQLite rw)
+      ansible.builtin.user:
+        name: "{{ husky_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ husky_app_dir }}"
+        create_home: false
+        groups: "{{ enduro_data_group }}"
+        append: true
+
+    - name: Assert husky is a member of enduro-data
+      ansible.builtin.command: id -nG {{ husky_user }}
+      register: husky_groups
+      changed_when: false
+      failed_when: enduro_data_group not in husky_groups.stdout.split()
+
+    - name: Ensure /opt/husky directory tree
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ husky_user }}"
+        group: "{{ husky_user }}"
+        mode: "0755"
+      loop:
+        - "{{ husky_app_dir }}"
+        - "{{ husky_app_dir }}/app"
+        - "{{ husky_data_dir }}"
+
+    - name: Write /opt/husky/.env
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ husky_app_dir }}/.env"
+        owner: "{{ husky_user }}"
+        group: "{{ husky_user }}"
+        mode: "0600"
+      no_log: true
+      notify: restart husky
+
+    - name: Install husky systemd unit
+      ansible.builtin.template:
+        src: husky.service.j2
+        dest: /etc/systemd/system/husky.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart husky
+
+    - name: Enable husky service
+      ansible.builtin.systemd:
+        name: husky
+        enabled: true
+        daemon_reload: true
+
+    - name: Render husky.elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.husky.j2
+        dest: /etc/caddy/sites.d/husky.elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: husky_site_change
+
+    - name: Validate Caddy + reload (if site changed)
+      when: husky_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
+    # ════════════════════════════════════════════════════════════════════
+    # [DEPLOY] stage source → build on host → restart
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Snapshot previous .output (kept for rollback, max 3 retained)
+      ansible.builtin.shell: |
+        set -e
+        if [ -d {{ husky_app_dir }}/app/.output ] && [ -n "$(ls -A {{ husky_app_dir }}/app/.output 2>/dev/null)" ]; then
+          ts=$(date +%Y%m%d-%H%M%S)
+          mkdir -p {{ husky_app_dir }}/releases
+          cp -a {{ husky_app_dir }}/app/.output {{ husky_app_dir }}/releases/output-$ts
+          ls -1dt {{ husky_app_dir }}/releases/output-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+          echo "snapshot=$ts"
+        else
+          echo "snapshot=none"
+        fi
+      register: snapshot_result
+      changed_when: "'snapshot=' in snapshot_result.stdout and 'snapshot=none' not in snapshot_result.stdout"
+
+    # Source comes from the staged clone (dist_dir). --delete keeps the tree in
+    # sync, but node_modules / .output / .npm-cache are EXCLUDED so they survive
+    # for the next npm ci's offline cache (build.sh already left them out of dist/).
+    - name: Rsync staged source to server
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/"
+        dest: "{{ husky_app_dir }}/app/"
+        delete: true
+        rsync_opts:
+          - "--exclude=node_modules"
+          - "--exclude=.nuxt"
+          - "--exclude=.output"
+          - "--exclude=.npm-cache"
+          - "--exclude=.data"
+
+    - name: Fix ownership on /opt/husky/app
+      ansible.builtin.file:
+        path: "{{ husky_app_dir }}/app"
+        state: directory
+        recurse: true
+        owner: "{{ husky_user }}"
+        group: "{{ husky_user }}"
+
+    # husky user has create_home:false, so $HOME is unset when running as it.
+    # npm needs a writable HOME — point it (and the cache) into the app dir.
+    - name: npm ci (install + rebuild native bindings for this host)
+      ansible.builtin.command:
+        cmd: npm ci --prefer-offline --no-audit --fund=false
+        chdir: "{{ husky_app_dir }}/app"
+      become_user: "{{ husky_user }}"
+      environment:
+        HOME: "{{ husky_app_dir }}/app"
+        npm_config_cache: "{{ husky_app_dir }}/app/.npm-cache"
+      changed_when: true
+
+    - name: npm run build
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ husky_app_dir }}/app"
+      become_user: "{{ husky_user }}"
+      environment:
+        HOME: "{{ husky_app_dir }}/app"
+      changed_when: true
+
+    - name: Verify .output/ exists
+      ansible.builtin.stat:
+        path: "{{ husky_app_dir }}/app/.output"
+      register: output_stat
+
+    - name: Fail if build produced no output
+      ansible.builtin.fail:
+        msg: ".output/ not found after npm run build"
+      when: not output_stat.stat.exists
+
+    # Prune source post-build. Runtime only needs .output/; package*.json +
+    # node_modules stay for next deploy's npm ci cache speed.
+    - name: Prune source files after build (keep .output + node_modules + package*.json)
+      ansible.builtin.file:
+        path: "{{ husky_app_dir }}/app/{{ item }}"
+        state: absent
+      loop:
+        - app
+        - server
+        - shared
+        - public
+        - nuxt.config.ts
+        - tsconfig.json
+
+    - name: Restart husky.service
+      ansible.builtin.systemd:
+        name: husky
+        state: restarted
+        daemon_reload: true
+
+    - name: Pause briefly for service to come up
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Health check (HTTP 200 from /login)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ husky_internal_port }}/login"
+        status_code: 200
+        return_content: false
+      register: health
+      retries: 6
+      delay: 2
+      until: health.status == 200
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg: "Deployed. husky.service active. /login → {{ health.status }}."
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart husky
+      ansible.builtin.systemd:
+        name: husky
+        state: restarted
+      failed_when: false

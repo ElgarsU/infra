@@ -1,0 +1,100 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# prelander app play — static elgars.eu landing page.
+#
+#   ../../deploy.sh prelander        (from the infra repo root)
+#
+# Pure static files served by Caddy file_server. No systemd unit, no DB, no
+# app secrets. TLS uses the shared cloudflare.env written by the base caddy role.
+#
+# Build model: deploy.sh clones elgars-eu-prelander, runs build.sh (stages
+# index.html + icons into dist/), passes dist_dir. This play copies them to the
+# web root and renders the Caddy site.
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: prelander
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    web_root: /var/www/elgars-prelander
+    domain: elgars.eu
+    www_alias: www.elgars.eu
+
+  pre_tasks:
+    - name: Assert staged files were passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - (dist_dir ~ '/index.html') is file
+        fail_msg: >-
+          Staged site not found at {{ dist_dir | default('(unset)') }}/index.html.
+          Run via ./deploy.sh prelander.
+      delegate_to: localhost
+      become: false
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+
+    - name: Assert base caddy role has run
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists
+          - base_infra.results[1].stat.exists
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first — needs the Caddy base."
+
+  tasks:
+    - name: Ensure web root exists
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: root
+        group: caddy
+        mode: "0755"
+
+    # Copy the static files (everything build.sh staged except MANIFEST).
+    - name: Deploy static site files
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/"
+        dest: "{{ web_root }}/"
+        delete: true
+        rsync_opts:
+          - "--exclude=MANIFEST"
+
+    - name: Fix ownership on web root (root:caddy, 0644 files)
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        recurse: true
+        owner: root
+        group: caddy
+
+    - name: Render elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.prelander.j2
+        dest: /etc/caddy/sites.d/elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: prelander_site_change
+
+    - name: Validate Caddy + reload (if site changed)
+      when: prelander_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg: "Deployed. https://{{ domain }} + https://{{ www_alias }} → {{ web_root }} (file_server)."

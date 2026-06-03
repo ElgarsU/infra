@@ -1,0 +1,46 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
+<!--
+    Managed by infra apps/tracker/ansible/playbook.yml. Do not edit on the VPS.
+    Loaded by Traccar at startup. Keys verified against Keys.java for v6.13.3.
+-->
+<properties>
+
+    <entry key='config.default'>./conf/default.xml</entry>
+
+    <!-- Database -->
+    <entry key='database.driver'>org.postgresql.Driver</entry>
+    <entry key='database.url'>jdbc:postgresql://{{ postgres_listen_address }}:5432/{{ postgres_traccar_db }}</entry>
+    <entry key='database.user'>{{ postgres_traccar_user }}</entry>
+    <entry key='database.password'>{{ postgres_traccar_password }}</entry>
+
+    <!-- Web UI (bound to localhost; reached via Caddy on track.elgars.eu) -->
+    <entry key='web.address'>{{ traccar_web_address }}</entry>
+    <entry key='web.port'>{{ traccar_web_port }}</entry>
+
+    <!-- Device protocol: Teltonika FMC880, Codec 8E over TCP.
+         protocols.enable is an allowlist — without it, ServerManager scans
+         org.traccar.protocol.* and opens a hardcoded default port for EVERY
+         protocol (~240 ports, 5001-5263). Setting protocols.enable here
+         restricts the listener loop to the named protocols only.
+         (Verified against ServerManager.java line 50 in v6.13.3.) -->
+    <entry key='protocols.enable'>teltonika</entry>
+    <entry key='teltonika.port'>{{ traccar_device_port }}</entry>
+
+{% if pushover_user is defined and 'PASTE' not in pushover_user and pushover_token is defined and 'PASTE' not in pushover_token %}
+    <!-- Pushover push notifications. Credentials from secrets/tracker.env.
+         notificator.types MUST include 'pushover' or NotificatorManager.getNotificator()
+         throws "Failed to get notificator pushover" at alarm time — the default is
+         only 'web,mail,command' (verified against NotificatorManager.java +
+         Keys.NOTIFICATOR_TYPES in v6.13.3). The .user value is the account-level
+         fallback; a per-user `pushoverUserKey` attribute can override it. -->
+    <entry key='notificator.types'>web,mail,command,pushover</entry>
+    <entry key='notificator.pushover.user'>{{ pushover_user }}</entry>
+    <entry key='notificator.pushover.token'>{{ pushover_token }}</entry>
+{% endif %}
+    <!-- Phase 2: anti-theft alert service (events only, NOT raw position stream).
+         Uncomment and point at the alert service URL when Phase 2 ships.
+    <entry key='event.forward.url'>http://127.0.0.1:8090/traccar-events</entry>
+    -->
+
+</properties>

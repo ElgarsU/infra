@@ -1,0 +1,8 @@
+---
+# Shared group for SQLite access to /var/lib/sentry/state.db.
+# Owned here (common) per the "one role creates the group, each app asserts
+# its user is in it" contract. sentry + husky add their users with append:true.
+enduro_data_group: enduro-data
+
+# Node.js major version installed via NodeSource (husky SSR + tet-fit need it).
+node_major: "20"

@@ -1,0 +1,22 @@
+# Managed by infra apps/tracker/ansible/playbook.yml.
+track.elgars.eu {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    encode gzip
+    import security_headers
+
+    # External liveness probe for the sentry service (anti-theft Pushover
+    # dispatcher). UptimeRobot hits https://track.elgars.eu/sentry-health;
+    # Caddy strips the path and proxies to localhost:8091/health (sentry binds
+    # 127.0.0.1 only). Listed FIRST so it's evaluated before the catch-all.
+    handle /sentry-health {
+        rewrite * /health
+        reverse_proxy 127.0.0.1:8091
+    }
+
+    # Everything else → Traccar web UI.
+    handle {
+        reverse_proxy 127.0.0.1:{{ traccar_web_port }}
+    }
+}

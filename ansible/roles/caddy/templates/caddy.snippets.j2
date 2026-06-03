@@ -1,0 +1,12 @@
+# Managed by the infra `caddy` role. Shared Caddy snippets.
+# Imported automatically by /etc/caddy/Caddyfile.
+
+(security_headers) {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}

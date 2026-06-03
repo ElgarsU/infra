@@ -1,0 +1,43 @@
+---
+# ── Shared PostgreSQL instance ────────────────────────────────────────────
+# Single Postgres server, bound to localhost. Apps create their own
+# database + role inside their app role (currently only tracker uses PG;
+# its role creates the `traccar` DB/role). This base role just guarantees
+# the server is installed, running, and not exposed beyond 127.0.0.1.
+#
+# Ubuntu main unversioned meta-package (PG 16 on 24.04) — no PGDG pin.
+# python3-psycopg2 is required by the community.postgresql modules that
+# app roles use.
+
+- name: Install Postgres + psycopg2
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - python3-psycopg2
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure Postgres is enabled and running
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: true
+    state: started
+
+- name: Query Postgres listen_addresses
+  become_user: postgres
+  community.postgresql.postgresql_query:
+    db: postgres
+    query: "SHOW listen_addresses"
+  register: pg_listen
+  changed_when: false
+
+- name: Assert Postgres is bound to localhost only (do not mutate here)
+  ansible.builtin.assert:
+    that:
+      - pg_listen.query_result[0]['listen_addresses'] in ['localhost', '127.0.0.1']
+    fail_msg: >-
+      Postgres listen_addresses is
+      '{{ pg_listen.query_result[0]['listen_addresses'] }}'. Expected
+      'localhost'. Investigate what set this before proceeding — the shared
+      instance must never be exposed beyond 127.0.0.1.

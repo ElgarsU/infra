@@ -1,0 +1,15 @@
+# Real secret values never leave the laptop. Only *.env.example is tracked.
+# (The secrets/ dir has its own .gitignore too — belt and suspenders.)
+secrets/*.env
+
+# Per-deploy scratch
+.deploy-tmp/
+*.retry
+.DS_Store
+
+# Ansible
+*.pyc
+__pycache__/
+
+# Local Claude Code settings
+.claude/settings.local.json

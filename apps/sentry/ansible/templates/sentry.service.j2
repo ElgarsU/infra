@@ -1,0 +1,32 @@
+# Managed by infra apps/sentry/ansible/playbook.yml. Do not edit on the VPS.
+[Unit]
+Description=Sentry — Traccar alarm watcher + Pushover dispatcher
+After=network-online.target postgresql.service traccar.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ sentry_user }}
+Group={{ sentry_user }}
+SupplementaryGroups={{ enduro_data_group }}
+WorkingDirectory={{ sentry_app_dir }}
+EnvironmentFile={{ sentry_app_dir }}/.env
+ExecStart={{ sentry_app_dir }}/sentry
+Restart=always
+RestartSec=10
+
+# UMask=002 + the setgid bit on {{ sentry_data_dir }} ensures SQLite WAL files
+# created at runtime end up `0660 sentry:{{ enduro_data_group }}`, which Husky
+# (added to {{ enduro_data_group }}) can write. SQLite hardcodes 0644 on create,
+# so the daemon also chmods the DB file at startup (EnsureSharedPerms in main.go).
+UMask=002
+
+# Sandboxing — same flavour as husky.service / traccar.service.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ sentry_data_dir }}
+
+[Install]
+WantedBy=multi-user.target

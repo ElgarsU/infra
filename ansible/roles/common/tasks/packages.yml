@@ -1,0 +1,57 @@
+---
+# ── Base packages ─────────────────────────────────────────────────────────
+# unzip      — tracker (Traccar release zip)
+# sqlite3    — sentry/husky/discord-scraper state DBs (CLI for ops/backups)
+# rsync      — app deploys (husky/tet-fit .output sync)
+# build-essential + python3 — husky's better-sqlite3 native build on the host
+# jq/curl    — cf-ufw-update.sh + general ops
+# fail2ban   — sshd jail (configured in hardening.yml)
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+      - jq
+      - curl
+      - sqlite3
+      - rsync
+      - unzip
+      - build-essential
+      - python3
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# ── Node.js 20 (NodeSource) ───────────────────────────────────────────────
+# husky (Nuxt SSR) and tet-fit (Nuxt SPA + Nitro) both run under Node on the
+# VPS. A fresh-VPS rebuild (./setup.sh) needs Node present before those apps
+# deploy, so we install it here in the base layer rather than per-app.
+
+- name: Check Node.js version on host
+  ansible.builtin.command: node --version
+  register: node_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Add NodeSource apt repository (only if Node missing or too old)
+  ansible.builtin.shell:
+    cmd: "curl -fsSL https://deb.nodesource.com/setup_{{ node_major }}.x | bash -"
+  when: >-
+    node_version_check.rc != 0 or
+    not (node_version_check.stdout is regex('^v(2[0-9]|[3-9][0-9])\\.'))
+  changed_when: true
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+  when: >-
+    node_version_check.rc != 0 or
+    not (node_version_check.stdout is regex('^v(2[0-9]|[3-9][0-9])\\.'))
+
+- name: Assert Node.js 20+ is now present
+  ansible.builtin.command: node --version
+  register: node_version_final
+  changed_when: false
+  failed_when: not (node_version_final.stdout is regex('^v(2[0-9]|[3-9][0-9])\\.'))

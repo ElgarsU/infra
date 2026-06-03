@@ -1,0 +1,44 @@
+---
+# ── ufw posture ───────────────────────────────────────────────────────────
+# Default deny incoming / allow outgoing. SSH (22) is allowed BEFORE ufw is
+# enabled so a fresh-VPS bootstrap can't lock itself out. Public 80/443 are
+# restricted to Cloudflare IP ranges by cf-ufw-update.sh (refreshed monthly).
+#
+# Per-app ports are opened by app roles:
+#   • tracker → 5027/tcp (Traccar device ingest, rate-limited)
+# Localhost-only ports (8082, 8091, 3000, 3001, 5432) are never opened in ufw.
+#
+# NOTE: ICMP is deliberately blocked at the Hetzner cloud-firewall layer
+# (out-of-band, not managed here — see docs/vps-inventory.md). ufw's default
+# before.rules still permits echo; the cloud firewall is the authoritative
+# ICMP block. Do not "fix" pings by opening ICMP.
+
+- name: Ensure ufw allows OpenSSH before enabling (anti-lockout)
+  community.general.ufw:
+    rule: allow
+    name: OpenSSH
+
+- name: Set ufw default policy — deny incoming
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Set ufw default policy — allow outgoing
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled
+
+- name: Install Cloudflare-IP ufw refresh script
+  ansible.builtin.template:
+    src: cf-ufw-update.sh.j2
+    dest: /etc/cron.monthly/cf-ufw-update.sh
+    mode: "0755"
+
+- name: Apply CF firewall rules now (restricts 80/443 to Cloudflare IPs)
+  ansible.builtin.command: /etc/cron.monthly/cf-ufw-update.sh
+  register: cf_ufw_result
+  changed_when: "'rules refreshed' in cf_ufw_result.stdout"

@@ -1,0 +1,8 @@
+---
+# Base VPS setup: packages, shared group, host hardening, firewall.
+# Extracted from the original husky setup.yml (the most mature base config).
+
+- import_tasks: packages.yml
+- import_tasks: users.yml
+- import_tasks: hardening.yml
+- import_tasks: firewall.yml

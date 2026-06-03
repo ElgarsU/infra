@@ -1,0 +1,192 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# tet-fit app play.
+#
+#   ../../deploy.sh tet-fit        (from the infra repo root)
+#
+# Nuxt 3 SPA (ssr:false) + Nitro Node server. State is JSON files in
+# /opt/tet-training/data (no DB). Built LOCALLY (no native deps) and the
+# .output bundle is rsynced to the VPS; runs under www-data on 127.0.0.1:3000,
+# reverse-proxied by Caddy at fit.elgars.eu.
+#
+# Names note: unit/dir/service are "tet-training" (preserved from the original
+# deploy); the infra app + repo are "tet-fit".
+#
+# Secret from the environment: TET_AUTH_HASH (secrets/tet-fit.env). The app
+# reads this from process.env (migrated out of server/api/login.post.ts).
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: tet-fit
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    app_dir: /opt/tet-training
+    data_dir: /opt/tet-training/data
+    service_name: tet-training
+    app_user: www-data
+    fit_internal_port: 3000
+    tet_auth_hash: "{{ lookup('env', 'TET_AUTH_HASH') }}"
+
+  pre_tasks:
+    - name: Assert built .output was passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - (dist_dir ~ '/.output/server/index.mjs') is file
+        fail_msg: >-
+          Built bundle not found at {{ dist_dir | default('(unset)') }}/.output.
+          Run via ./deploy.sh tet-fit (clones tet-fit, runs build.sh, passes dist_dir).
+      delegate_to: localhost
+      become: false
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+
+    - name: Assert base roles + Node have run
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists
+          - base_infra.results[1].stat.exists
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first — needs Caddy base + Node 20."
+
+    - name: Validate auth-hash secret is filled in
+      ansible.builtin.assert:
+        that:
+          - tet_auth_hash | length == 64
+          - "'PASTE' not in tet_auth_hash"
+        fail_msg: >-
+          TET_AUTH_HASH must be the 64-char SHA-256 of "user:password".
+          Set it in secrets/tet-fit.env.
+
+  tasks:
+    - name: Ensure app + data directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/.output"
+        - "{{ data_dir }}"
+
+    # Per-user state JSON is precious — snapshot before swapping .output.
+    - name: Back up training state (timestamped) before deploy
+      ansible.builtin.shell: |
+        set -e
+        if ls {{ data_dir }}/training-state*.json >/dev/null 2>&1; then
+          ts=$(date +%Y%m%d-%H%M%S)
+          mkdir -p {{ data_dir }}/backups
+          cp -a {{ data_dir }}/training-state*.json {{ data_dir }}/backups/ 2>/dev/null || true
+          echo "backed-up=$ts"
+        else
+          echo "backed-up=none"
+        fi
+      register: state_backup
+      changed_when: "'backed-up=none' not in state_backup.stdout"
+
+    - name: Rsync built .output to server
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/.output/"
+        dest: "{{ app_dir }}/.output/"
+        delete: true
+
+    - name: Fix ownership on .output
+      ansible.builtin.file:
+        path: "{{ app_dir }}/.output"
+        state: directory
+        recurse: true
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+
+    - name: Render EnvironmentFile (auth hash secret)
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        content: |
+          # Managed by infra apps/tet-fit/ansible/playbook.yml. Mode 0640.
+          TET_AUTH_HASH={{ tet_auth_hash }}
+        owner: root
+        group: "{{ app_user }}"
+        mode: "0640"
+      no_log: true
+      notify: restart tet-training
+
+    - name: Install systemd unit
+      ansible.builtin.template:
+        src: tet-training.service.j2
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart tet-training
+
+    - name: Enable tet-training service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        enabled: true
+        daemon_reload: true
+
+    - name: Render fit.elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.fit.j2
+        dest: /etc/caddy/sites.d/fit.elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: fit_site_change
+
+    - name: Validate Caddy + reload (if site changed)
+      when: fit_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Restart tet-training
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted
+        daemon_reload: true
+
+    - name: Pause briefly for service to come up
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Health check (HTTP 200 on root)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ fit_internal_port }}"
+        status_code: 200
+        return_content: false
+      register: health
+      retries: 6
+      delay: 2
+      until: health.status == 200
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg: "Deployed. {{ service_name }}.service active. root → {{ health.status }}."
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart tet-training
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted
+      failed_when: false

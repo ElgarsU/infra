@@ -1,0 +1,14 @@
+# Managed by infra apps/prelander/ansible/playbook.yml.
+# Apex + www. DNS-01 TLS (required behind Cloudflare orange-cloud), static
+# file_server, shared security_headers snippet, 1h cache.
+
+{{ domain }}, {{ www_alias }} {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    root * {{ web_root }}
+    file_server
+    encode zstd gzip
+    import security_headers
+    header Cache-Control "public, max-age=3600"
+}

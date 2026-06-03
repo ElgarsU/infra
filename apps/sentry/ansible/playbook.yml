@@ -1,0 +1,310 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Sentry app play — Traccar alarm watcher + Pushover emergency dispatcher.
+#
+#   ../../deploy.sh sentry        (from the infra repo root)
+#
+# Idempotent. Re-running:
+#   • Replaces /opt/sentry/sentry only when the bytes changed (triggers restart)
+#   • SQL is INSERT…WHERE NOT EXISTS — no duplicate Traccar users / device links
+#
+# Build model: deploy.sh clones enduro-tracking, runs its build.sh (Go
+# cross-compile → dist/sentry-linux-arm64), and passes dist_dir to this play,
+# which COPIES the prebuilt binary. No build happens here.
+#
+# Depends on:
+#   • base roles (common): enduro-data group already created
+#   • tracker: Traccar running + FMC880 device registered (sentry links to it)
+# Secrets from the environment: SENTRY_TRACCAR_* (secrets/sentry.env),
+# PUSHOVER_* (secrets/tracker.env — shared, single source of truth).
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Sentry
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    # ── Secrets (from the environment) ──────────────────────────────────
+    sentry_traccar_username: "{{ lookup('env', 'SENTRY_TRACCAR_USERNAME') }}"
+    sentry_traccar_password: "{{ lookup('env', 'SENTRY_TRACCAR_PASSWORD') }}"
+    pushover_user:           "{{ lookup('env', 'PUSHOVER_USER') }}"
+    pushover_token:          "{{ lookup('env', 'PUSHOVER_TOKEN') }}"
+
+    sentry_user: sentry
+    enduro_data_group: enduro-data
+    sentry_app_dir: /opt/sentry
+    sentry_data_dir: /var/lib/sentry
+    traccar_web_port: 8082
+
+    # FMC880 IMEI — same value tracker uses. We resolve the live device id by
+    # querying tc_devices so .env is correct even on a fresh rebuild.
+    sentry_device_imei: "862129081248340"
+
+    # Prebuilt binary produced by enduro-tracking's build.sh (dist_dir is
+    # passed via -e by deploy.sh).
+    sentry_binary_src: "{{ dist_dir | default('') }}/sentry-linux-arm64"
+
+  pre_tasks:
+    - name: Assert architecture is ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+        fail_msg: "Sentry binary is built for ARM64. Detected: {{ ansible_architecture }}."
+
+    - name: Assert OS is Ubuntu 24.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: >-
+          Sentry is pinned to Ubuntu 24.04. Detected:
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+    - name: Assert prebuilt sentry binary was passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - sentry_binary_src is file
+        fail_msg: >-
+          Prebuilt binary not found at {{ sentry_binary_src | default('(dist_dir unset)') }}.
+          Run via ./deploy.sh sentry (it clones enduro-tracking, runs build.sh,
+          and passes dist_dir).
+      delegate_to: localhost
+      become: false
+
+    - name: Stat traccar.service (tracker must have run first)
+      ansible.builtin.stat:
+        path: /etc/systemd/system/traccar.service
+      register: traccar_unit
+
+    - name: Stat enduro-data group ownership (base common role)
+      ansible.builtin.command: getent group {{ enduro_data_group }}
+      register: enduro_group_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert tracker + base roles are present
+      ansible.builtin.assert:
+        that:
+          - traccar_unit.stat.exists
+          - enduro_group_check.rc == 0
+        fail_msg: >-
+          Requires the tracker app (Traccar + device) and the base roles
+          (enduro-data group). Run ./setup.sh, or ./deploy.sh tracker after
+          ansible/site.yml.
+
+    - name: Validate secrets are filled in
+      ansible.builtin.assert:
+        that:
+          - sentry_traccar_username | length > 0
+          - sentry_traccar_password | length > 0
+          - "'PASTE' not in sentry_traccar_password"
+          - pushover_token | length > 0
+          - "'PASTE' not in pushover_token"
+          - pushover_user | length > 0
+          - "'PASTE' not in pushover_user"
+        fail_msg: >-
+          Missing values. SENTRY_TRACCAR_* come from secrets/sentry.env;
+          PUSHOVER_* come from secrets/tracker.env (shared). Fill both in.
+
+  tasks:
+    # ── System user (enduro-data group owned by the common role) ─────────
+    - name: Create sentry system user (in enduro-data as supplementary)
+      ansible.builtin.user:
+        name: "{{ sentry_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ sentry_app_dir }}"
+        create_home: false
+        groups: "{{ enduro_data_group }}"
+        append: true
+        state: present
+
+    # Per the "each app asserts its user is in the shared group" contract.
+    - name: Assert sentry is a member of enduro-data
+      ansible.builtin.command: id -nG {{ sentry_user }}
+      register: sentry_groups
+      changed_when: false
+      failed_when: enduro_data_group not in sentry_groups.stdout.split()
+
+    # ── Filesystem layout ────────────────────────────────────────────────
+    - name: Ensure /opt/sentry exists
+      ansible.builtin.file:
+        path: "{{ sentry_app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # 2770 = setgid + rwx owner+group. Setgid forces any file created here to
+    # inherit group=enduro-data regardless of which process (sentry or husky)
+    # created it. Combined with UMask=002 in sentry.service, SQLite WAL/journal
+    # files end up 0660 sentry:enduro-data, husky-writable.
+    - name: Ensure /var/lib/sentry exists (setgid 2770 sentry:enduro-data)
+      ansible.builtin.file:
+        path: "{{ sentry_data_dir }}"
+        state: directory
+        owner: "{{ sentry_user }}"
+        group: "{{ enduro_data_group }}"
+        mode: "02770"
+
+    # ── Binary deploy (idempotent via checksum) ──────────────────────────
+    - name: Install sentry binary at {{ sentry_app_dir }}/sentry
+      ansible.builtin.copy:
+        src: "{{ sentry_binary_src }}"
+        dest: "{{ sentry_app_dir }}/sentry"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: restart sentry
+
+    # ── Resolve Traccar device id (so .env is right on any rebuild) ──────
+    - name: Resolve Traccar device id by IMEI (read-only)
+      become_user: postgres
+      community.postgresql.postgresql_query:
+        db: traccar
+        query: "SELECT id FROM tc_devices WHERE uniqueid = %s"
+        positional_args:
+          - "{{ sentry_device_imei }}"
+      register: device_lookup
+      changed_when: false
+
+    - name: Assert the FMC880 device is registered in Traccar
+      ansible.builtin.assert:
+        that:
+          - device_lookup.query_result | length == 1
+        fail_msg: >-
+          No tc_devices row found for IMEI {{ sentry_device_imei }}. The
+          tracker app pre-registers it — has ./deploy.sh tracker run?
+
+    - name: Set fact for resolved device id
+      ansible.builtin.set_fact:
+        traccar_device_id_resolved: "{{ device_lookup.query_result[0].id }}"
+
+    # ── Sentry .env (secrets) ────────────────────────────────────────────
+    - name: Render /opt/sentry/.env (0640 root:sentry; secrets not world-readable)
+      ansible.builtin.template:
+        src: sentry.env.j2
+        dest: "{{ sentry_app_dir }}/.env"
+        owner: root
+        group: "{{ sentry_user }}"
+        mode: "0640"
+      no_log: true
+      notify: restart sentry
+
+    # ── systemd unit ─────────────────────────────────────────────────────
+    - name: Install sentry systemd unit
+      ansible.builtin.template:
+        src: sentry.service.j2
+        dest: /etc/systemd/system/sentry.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart sentry
+
+    # ── Traccar 'sentry' user (read-only, linked to device) ──────────────
+    # PBKDF2WithHmacSHA1 hash computed on the control node (plaintext never
+    # leaves the laptop), idempotent INSERT keyed on email.
+    - name: Compute PBKDF2 hash + salt for the sentry Traccar password (control node)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import hashlib, os, binascii, sys
+            password = sys.argv[1]
+            salt = os.urandom(24)
+            digest = hashlib.pbkdf2_hmac('sha1', password.encode(), salt, 1000, 24)
+            print(binascii.hexlify(salt).decode())
+            print(binascii.hexlify(digest).decode())
+          - "{{ sentry_traccar_password }}"
+      delegate_to: localhost
+      become: false
+      register: pbkdf
+      changed_when: false
+      no_log: true
+
+    - name: Check if Traccar sentry user already exists
+      become_user: postgres
+      community.postgresql.postgresql_query:
+        db: traccar
+        query: "SELECT id FROM tc_users WHERE email = %s"
+        positional_args:
+          - "{{ sentry_traccar_username }}"
+      register: existing_sentry_user
+
+    - name: Create Traccar sentry user (administrator=false, readonly=true)
+      become_user: postgres
+      community.postgresql.postgresql_query:
+        db: traccar
+        query: |
+          INSERT INTO tc_users (name, email, hashedpassword, salt, administrator, readonly)
+          VALUES (%s, %s, %s, %s, false, true)
+        positional_args:
+          - "{{ sentry_traccar_username }}"
+          - "{{ sentry_traccar_username }}"
+          - "{{ pbkdf.stdout_lines[1] }}"
+          - "{{ pbkdf.stdout_lines[0] }}"
+      when: existing_sentry_user.query_result | length == 0
+      no_log: true
+
+    - name: Link Traccar sentry user to the device (idempotent)
+      become_user: postgres
+      community.postgresql.postgresql_query:
+        db: traccar
+        query: |
+          INSERT INTO tc_user_device (userid, deviceid)
+          SELECT u.id, d.id
+          FROM tc_users u
+          JOIN tc_devices d ON d.uniqueid = %s
+          WHERE u.email = %s
+            AND NOT EXISTS (
+              SELECT 1 FROM tc_user_device ud
+              WHERE ud.userid = u.id AND ud.deviceid = d.id
+            );
+        positional_args:
+          - "{{ sentry_device_imei }}"
+          - "{{ sentry_traccar_username }}"
+
+    # ── Enable + start ───────────────────────────────────────────────────
+    - name: Enable and start sentry
+      ansible.builtin.systemd:
+        name: sentry
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Apply pending handlers before health check
+      ansible.builtin.meta: flush_handlers
+
+    # ── Verify ───────────────────────────────────────────────────────────
+    - name: Wait briefly for sentry to settle
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Sentry service state
+      ansible.builtin.command: systemctl is-active sentry
+      register: sentry_active
+      changed_when: false
+      check_mode: false
+      failed_when: sentry_active.stdout != "active"
+
+    - name: Sentry boot summary
+      ansible.builtin.debug:
+        msg:
+          - "Sentry deployed. Service: {{ sentry_active.stdout }}."
+          - "Binary:  {{ sentry_app_dir }}/sentry"
+          - "SQLite:  {{ sentry_data_dir }}/state.db (sentry:{{ enduro_data_group }} 2770)"
+          - "Traccar: read-only user linked to device id={{ traccar_device_id_resolved }}"
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart sentry
+      ansible.builtin.systemd:
+        name: sentry
+        state: restarted

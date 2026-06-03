@@ -1,0 +1,14 @@
+---
+# ── Shared groups ─────────────────────────────────────────────────────────
+# enduro-data is the cross-app group for shared SQLite access to
+# /var/lib/sentry/state.db (owned by the sentry service). This common role
+# is the SINGLE OWNER of the group's creation. Each app role then adds its
+# own user with `append: true` and ASSERTS membership — see apps/sentry and
+# apps/husky. Per-app system users (traccar, sentry, husky, discord-scraper,
+# www-data) are created by their own app roles, not here.
+
+- name: Create enduro-data system group (shared rw on /var/lib/sentry)
+  ansible.builtin.group:
+    name: "{{ enduro_data_group }}"
+    system: true
+    state: present

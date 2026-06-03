@@ -1,0 +1,31 @@
+---
+# ── Host hardening ────────────────────────────────────────────────────────
+# fail2ban sshd jail, sshd drop-in (key-only root, low MaxAuthTries),
+# unattended-upgrades auto-reboot. Extracted verbatim from husky setup.yml.
+
+- name: Configure fail2ban sshd jail
+  ansible.builtin.template:
+    src: fail2ban-sshd.local.j2
+    dest: /etc/fail2ban/jail.d/sshd.local
+    mode: "0644"
+  notify: reload fail2ban
+
+- name: Enable + start fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: started
+
+- name: SSH hardening drop-in
+  ansible.builtin.template:
+    src: sshd-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-hardening.conf
+    mode: "0644"
+    validate: "sshd -t -f %s"
+  notify: reload sshd
+
+- name: Unattended-upgrades auto-reboot
+  ansible.builtin.template:
+    src: unattended-upgrades-reboot.conf.j2
+    dest: /etc/apt/apt.conf.d/52unattended-upgrades-reboot
+    mode: "0644"

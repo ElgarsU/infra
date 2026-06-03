@@ -1,0 +1,9 @@
+# Single Hetzner CAX11 (ARM64), Ubuntu 24.04, Helsinki.
+# Every app on this box deploys via Ansible from a local control node (laptop).
+# See docs/vps-inventory.md for the full live inventory.
+all:
+  hosts:
+    vps:
+      ansible_host: 89.167.98.246
+      ansible_user: root
+      ansible_python_interpreter: /usr/bin/python3

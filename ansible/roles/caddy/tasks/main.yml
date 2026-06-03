@@ -1,0 +1,134 @@
+---
+# ── Shared Caddy reverse proxy ────────────────────────────────────────────
+# Owns the base Caddy layout that every app's site file plugs into:
+#   • cloudflare-dns plugin (DNS-01 TLS — required behind CF orange-cloud)
+#   • /etc/caddy/cloudflare.env (CF_API_TOKEN, sourced by caddy.service)
+#   • /etc/caddy/sites.d/   — one *.caddy per app (written by app roles)
+#   • /etc/caddy/snippets/  — shared (security_headers)
+#   • imports-only /etc/caddy/Caddyfile
+# Extracted from the original husky setup.yml (the most mature Caddy config).
+# Assumes Caddy is already installed (Ubuntu's caddy package ships a unit).
+
+- name: Assert Caddy is installed
+  ansible.builtin.command: caddy version
+  register: caddy_version
+  changed_when: false
+
+- name: Check if Caddy cloudflare-dns plugin is installed
+  ansible.builtin.command: caddy list-modules
+  register: caddy_modules
+  changed_when: false
+
+- name: Install Caddy cloudflare-dns plugin
+  ansible.builtin.command:
+    cmd: caddy add-package github.com/caddy-dns/cloudflare
+  when: "'dns.providers.cloudflare' not in caddy_modules.stdout"
+  notify: restart caddy
+
+- name: Ensure caddy.service.d dir exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/caddy.service.d
+    state: directory
+    mode: "0755"
+
+- name: Write Caddy systemd drop-in for CF env file
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/caddy.service.d/cloudflare-env.conf
+    content: |
+      [Service]
+      EnvironmentFile=/etc/caddy/cloudflare.env
+    mode: "0644"
+  notify:
+    - daemon reload
+    - restart caddy
+
+# CF_API_TOKEN comes from the environment (exported by setup.sh / deploy.sh
+# from secrets/common.env). Single source of truth for the DNS-01 token.
+- name: Write Cloudflare env file for Caddy
+  ansible.builtin.copy:
+    dest: /etc/caddy/cloudflare.env
+    content: |
+      # Loaded by caddy.service via /etc/systemd/system/caddy.service.d/cloudflare-env.conf
+      CF_API_TOKEN={{ lookup('env', 'CF_API_TOKEN') }}
+    owner: root
+    group: caddy
+    mode: "0640"
+  no_log: true
+  notify: restart caddy
+
+- name: Ensure /etc/caddy/sites.d and /etc/caddy/snippets exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/caddy/sites.d
+    - /etc/caddy/snippets
+
+- name: Write shared security_headers snippet
+  ansible.builtin.template:
+    src: caddy.snippets.j2
+    dest: /etc/caddy/snippets/security.caddy
+    mode: "0644"
+
+- name: Check whether /etc/caddy/Caddyfile is already refactored
+  ansible.builtin.command:
+    cmd: grep -F 'import sites.d' /etc/caddy/Caddyfile
+  register: caddy_refactor_check
+  changed_when: false
+  failed_when: false
+
+- name: Back up current Caddyfile (only on first refactor)
+  ansible.builtin.copy:
+    src: /etc/caddy/Caddyfile
+    dest: "/etc/caddy/Caddyfile.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+  when: caddy_refactor_check.rc != 0
+
+- name: Write new Caddyfile (imports-only)
+  ansible.builtin.template:
+    src: Caddyfile.main.j2
+    dest: /etc/caddy/Caddyfile
+    mode: "0644"
+
+# Flush "restart caddy" handlers FIRST (cloudflare-env / systemd drop-in
+# changes need a restart before validate sees the new env).
+- name: Apply any pending Caddy restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Validate Caddyfile + reload — rollback Caddyfile on failure
+  block:
+    - name: caddy validate (with CF env loaded)
+      ansible.builtin.shell:
+        cmd: |
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+        executable: /bin/bash
+      changed_when: false
+    - name: Reload caddy
+      ansible.builtin.systemd:
+        name: caddy
+        state: reloaded
+  rescue:
+    - name: Restore most recent Caddyfile backup
+      ansible.builtin.shell: |
+        set -e
+        latest=$(ls -1t /etc/caddy/Caddyfile.bak-* 2>/dev/null | head -1)
+        if [ -n "$latest" ]; then
+          cp "$latest" /etc/caddy/Caddyfile
+          echo "Restored Caddyfile from $latest"
+        else
+          echo "No backup found — leaving Caddyfile as-is"
+          exit 1
+        fi
+      changed_when: true
+    - name: Abort — Caddy validation failed
+      ansible.builtin.fail:
+        msg: |
+          Caddy config did not validate. Caddyfile restored from backup.
+          Inspect /etc/caddy/sites.d/ + /etc/caddy/snippets/ on the host
+          and re-run.
