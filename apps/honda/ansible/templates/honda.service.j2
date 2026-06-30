@@ -1,0 +1,24 @@
+# Managed by infra apps/honda/ansible/playbook.yml.
+[Unit]
+Description=Honda · CRF300L maintenance log
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ honda_user }}
+Group={{ honda_user }}
+WorkingDirectory={{ honda_app_dir }}/app
+EnvironmentFile={{ honda_app_dir }}/.env
+ExecStart=/usr/bin/node {{ honda_app_dir }}/app/.output/server/index.mjs
+Restart=always
+RestartSec=5
+# Light sandboxing — app reads/writes its own data dir, nothing else
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ honda_data_dir }}
+
+[Install]
+WantedBy=multi-user.target

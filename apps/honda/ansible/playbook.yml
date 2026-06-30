@@ -1,0 +1,278 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Honda app play — Nuxt 4 SSR maintenance log for a Honda CRF300L.
+#
+#   ../../deploy.sh honda        (from the infra repo root)
+#
+# A standalone, single-rider maintenance + ride log (km-only; no engine-hour
+# meter, no live tracking). Mirrors the husky play but with NONE of husky's
+# cross-app couplings: no Traccar relay, no enduro-data group, no tracker/sentry
+# dependency. Just a Node SSR server + its own SQLite, behind Caddy.
+#
+# Why build on the host: honda uses better-sqlite3 (native .node binary). A
+# Mac-built artifact won't load on Linux, so `npm ci` + `npm run build` run
+# ON THE VPS. build.sh (in the honda repo) only STAGES clean source into dist/.
+#
+# Depends on:
+#   • base roles (common): Node 20, build-essential + python3
+#   • base roles (caddy):  cloudflare.env + security_headers snippet + sites.d/
+# Secrets from the environment (secrets/honda.env):
+#   HONDA_AUTH_USERNAME / HONDA_AUTH_PASSWORD_HASH / HONDA_SESSION_PASSWORD
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Honda
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    # ── Secrets (from the environment) ──────────────────────────────────
+    honda_auth_username:      "{{ lookup('env', 'HONDA_AUTH_USERNAME') }}"
+    honda_auth_password_hash: "{{ lookup('env', 'HONDA_AUTH_PASSWORD_HASH') }}"
+    honda_session_password:   "{{ lookup('env', 'HONDA_SESSION_PASSWORD') }}"
+
+    honda_app_dir: /opt/honda
+    honda_data_dir: /opt/honda/data
+    honda_user: honda
+    honda_internal_port: 3002
+
+  pre_tasks:
+    - name: Assert OS is Ubuntu 24.04 ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "Pinned to Ubuntu 24.04 ARM64."
+
+    - name: Assert staged source was passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - (dist_dir ~ '/package.json') is file
+        fail_msg: >-
+          Staged source not found at {{ dist_dir | default('(unset)') }}.
+          Run via ./deploy.sh honda (clones honda, runs build.sh, passes dist_dir).
+      delegate_to: localhost
+      become: false
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+
+    - name: Assert base roles + Node have run
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists
+          - base_infra.results[1].stat.exists
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first — needs Caddy base + Node 20."
+
+    - name: Validate secrets are filled in
+      ansible.builtin.assert:
+        that:
+          - honda_auth_username | length > 0
+          - honda_auth_password_hash | length > 0
+          - "'PASTE' not in honda_auth_password_hash"
+          - honda_session_password | length > 0
+          - "'PASTE' not in honda_session_password"
+        fail_msg: >-
+          Missing values. HONDA_AUTH_USERNAME / HONDA_AUTH_PASSWORD_HASH /
+          HONDA_SESSION_PASSWORD come from secrets/honda.env. Fill them in.
+
+  tasks:
+    # ════════════════════════════════════════════════════════════════════
+    # [BOOTSTRAP] user, directories, config, systemd unit, Caddy site
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Create honda system user
+      ansible.builtin.user:
+        name: "{{ honda_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ honda_app_dir }}"
+        create_home: false
+
+    - name: Ensure /opt/honda directory tree
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ honda_user }}"
+        group: "{{ honda_user }}"
+        mode: "0755"
+      loop:
+        - "{{ honda_app_dir }}"
+        - "{{ honda_app_dir }}/app"
+        - "{{ honda_data_dir }}"
+
+    - name: Write /opt/honda/.env
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ honda_app_dir }}/.env"
+        owner: "{{ honda_user }}"
+        group: "{{ honda_user }}"
+        mode: "0600"
+      no_log: true
+      notify: restart honda
+
+    - name: Install honda systemd unit
+      ansible.builtin.template:
+        src: honda.service.j2
+        dest: /etc/systemd/system/honda.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart honda
+
+    - name: Enable honda service
+      ansible.builtin.systemd:
+        name: honda
+        enabled: true
+        daemon_reload: true
+
+    - name: Render honda.elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.honda.j2
+        dest: /etc/caddy/sites.d/honda.elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: honda_site_change
+
+    - name: Validate Caddy + reload (if site changed)
+      when: honda_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
+    # ════════════════════════════════════════════════════════════════════
+    # [DEPLOY] stage source → build on host → restart
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Snapshot previous .output (kept for rollback, max 3 retained)
+      ansible.builtin.shell: |
+        set -e
+        if [ -d {{ honda_app_dir }}/app/.output ] && [ -n "$(ls -A {{ honda_app_dir }}/app/.output 2>/dev/null)" ]; then
+          ts=$(date +%Y%m%d-%H%M%S)
+          mkdir -p {{ honda_app_dir }}/releases
+          cp -a {{ honda_app_dir }}/app/.output {{ honda_app_dir }}/releases/output-$ts
+          ls -1dt {{ honda_app_dir }}/releases/output-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+          echo "snapshot=$ts"
+        else
+          echo "snapshot=none"
+        fi
+      register: snapshot_result
+      changed_when: "'snapshot=' in snapshot_result.stdout and 'snapshot=none' not in snapshot_result.stdout"
+
+    # Source comes from the staged clone (dist_dir). --delete keeps the tree in
+    # sync, but node_modules / .output / .npm-cache are EXCLUDED so they survive
+    # for the next npm ci's offline cache (build.sh already left them out of dist/).
+    - name: Rsync staged source to server
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/"
+        dest: "{{ honda_app_dir }}/app/"
+        delete: true
+        rsync_opts:
+          - "--exclude=node_modules"
+          - "--exclude=.nuxt"
+          - "--exclude=.output"
+          - "--exclude=.npm-cache"
+          - "--exclude=.data"
+
+    - name: Fix ownership on /opt/honda/app
+      ansible.builtin.file:
+        path: "{{ honda_app_dir }}/app"
+        state: directory
+        recurse: true
+        owner: "{{ honda_user }}"
+        group: "{{ honda_user }}"
+
+    # honda user has create_home:false, so $HOME is unset when running as it.
+    # npm needs a writable HOME — point it (and the cache) into the app dir.
+    - name: npm ci (install + rebuild native bindings for this host)
+      ansible.builtin.command:
+        cmd: npm ci --prefer-offline --no-audit --fund=false
+        chdir: "{{ honda_app_dir }}/app"
+      become_user: "{{ honda_user }}"
+      environment:
+        HOME: "{{ honda_app_dir }}/app"
+        npm_config_cache: "{{ honda_app_dir }}/app/.npm-cache"
+      changed_when: true
+
+    - name: npm run build
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ honda_app_dir }}/app"
+      become_user: "{{ honda_user }}"
+      environment:
+        HOME: "{{ honda_app_dir }}/app"
+      changed_when: true
+
+    - name: Verify .output/ exists
+      ansible.builtin.stat:
+        path: "{{ honda_app_dir }}/app/.output"
+      register: output_stat
+
+    - name: Fail if build produced no output
+      ansible.builtin.fail:
+        msg: ".output/ not found after npm run build"
+      when: not output_stat.stat.exists
+
+    # Prune source post-build. Runtime only needs .output/; package*.json +
+    # node_modules stay for next deploy's npm ci cache speed.
+    - name: Prune source files after build (keep .output + node_modules + package*.json)
+      ansible.builtin.file:
+        path: "{{ honda_app_dir }}/app/{{ item }}"
+        state: absent
+      loop:
+        - app
+        - server
+        - shared
+        - public
+        - nuxt.config.ts
+        - tsconfig.json
+
+    - name: Restart honda.service
+      ansible.builtin.systemd:
+        name: honda
+        state: restarted
+        daemon_reload: true
+
+    - name: Pause briefly for service to come up
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Health check (HTTP 200 from /login)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ honda_internal_port }}/login"
+        status_code: 200
+        return_content: false
+      register: health
+      retries: 6
+      delay: 2
+      until: health.status == 200
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg: "Deployed. honda.service active. /login → {{ health.status }}."
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart honda
+      ansible.builtin.systemd:
+        name: honda
+        state: restarted
+      failed_when: false

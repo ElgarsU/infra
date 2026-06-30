@@ -32,13 +32,17 @@ new app or port change updates this file as part of the deploy contract.
 | **discord-scraper** | — (no web) | — | — | `discord-scraper.service` + `.timer` | SQLite `/opt/discord-scraper/data/scraper.db` | `discord-scraper` | — |
 | **tet-fit** | `fit.elgars.eu` | — | 3000 | `tet-training.service` | JSON files `/opt/tet-training/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
+| **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /
   17:20 / 22:00 Europe/Riga), `Type=oneshot`, no long-running process, no ports.
 - `tet-fit`'s unit/dir/service are named **`tet-training`** (historical); the
   repo + infra app are **`tet-fit`** (`git@github.com:ElgarsU/tet-fit.git`).
-- All localhost ports (8082, 8091, 3000, 3001) and Postgres `5432` bind to
+- `honda` is a **standalone** Nuxt SSR maintenance log for a Honda CRF300L (a
+  gift build, km-only, no live tracking). Same stack as husky but with none of
+  husky's couplings — no Traccar, no `enduro-data`, no cross-app deps.
+- All localhost ports (8082, 8091, 3000, 3001, 3002) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 
 ## Shared infrastructure

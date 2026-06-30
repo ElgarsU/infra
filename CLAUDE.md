@@ -13,7 +13,8 @@ everything about *how it's deployed* lives here.
 - VPS: Hetzner **CAX11** (ARM64), Ubuntu 24.04, `89.167.98.246`, Helsinki.
 - Apps deployed here: **tracker** (Traccar GPS server), **sentry** (Go anti-theft
   alerter), **husky** (Nuxt SSR dashboard), **discord-scraper** (Python scraper,
-  timer), **tet-fit** (Nuxt SPA), **prelander** (static site).
+  timer), **tet-fit** (Nuxt SPA), **prelander** (static site), **honda** (Nuxt
+  SSR CRF300L maintenance log — standalone, no cross-app deps).
 - Full live layout: `docs/vps-inventory.md`.
 
 ## Architecture
@@ -78,6 +79,7 @@ spec + reference scripts: `docs/build-sh-contract.md`. Summary:
 | discord-scraper | stage source → `dist/` | **on the VPS** (venv + pip) |
 | tet-fit | `npm ci && npm run build` → `dist/.output` | control node (no native deps) |
 | prelander | copy static files → `dist/` | n/a (static) |
+| honda | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 
 `enduro-tracking` is one repo holding two infra apps (tracker + sentry); its
 single `build.sh` builds sentry. tracker needs no build.

@@ -1,0 +1,10 @@
+# Managed by infra apps/honda/ansible/playbook.yml.
+
+honda.elgars.eu {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    encode gzip
+    import security_headers
+    reverse_proxy 127.0.0.1:{{ honda_internal_port }}
+}

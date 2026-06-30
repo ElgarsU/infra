@@ -6,7 +6,7 @@ secrets live here.
 
 - **VPS:** Hetzner CAX11 (ARM64), Ubuntu 24.04, `89.167.98.246`, Helsinki.
 - **Apps:** `tracker` (Traccar), `sentry`, `husky`, `discord-scraper`,
-  `tet-fit`, `prelander`.
+  `tet-fit`, `prelander`, `honda`.
 
 ## Quick start
 
