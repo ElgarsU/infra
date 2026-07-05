@@ -7,7 +7,7 @@
 # This is the "rebuild from scratch" / disaster-recovery command. It:
 #   1. Runs base VPS provisioning (ansible/site.yml): common + caddy + postgres
 #   2. Deploys every app via its own deploy.sh, in dependency order:
-#        tracker → sentry → husky → discord-scraper → tet-fit → prelander
+#        tracker → sentry → husky → discord-scraper → forge → prelander
 #   3. Stops on the FIRST failure with a clear message.
 #
 # ⚠️  NOT for routine use against the LIVE VPS — it converges base host state
@@ -36,7 +36,7 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # Apps in dependency order. tracker provides Traccar + Postgres `traccar` DB;
 # sentry depends on tracker; husky depends on tracker (Traccar) + sentry
 # (enduro-data group). The rest are independent (honda is fully standalone).
-APPS=(tracker sentry husky discord-scraper tet-fit prelander honda)
+APPS=(tracker sentry husky discord-scraper forge prelander honda)
 
 step "Base VPS provisioning (ansible/site.yml)"
 # CF_API_TOKEN for the caddy role comes from secrets/common.env.

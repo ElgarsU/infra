@@ -8,7 +8,7 @@ a Node server on `127.0.0.1:3002` behind `foo.elgars.eu`. Adjust to taste.
 
 ## 1. Pick the slots
 
-- **Port:** next free localhost port in the 3000-block → `3002` (3000=tet-fit,
+- **Port:** next free localhost port in the 3000-block → `3002` (3000=forge,
   3001=husky). Bind `127.0.0.1` only.
 - **Subdomain:** `foo.elgars.eu`. Create a Cloudflare DNS record, **orange-cloud**,
   → `89.167.98.246`.
@@ -36,7 +36,7 @@ In the **app repo**, add `build.sh` at the root per `docs/build-sh-contract.md`:
 produce `./dist/` + `./dist/MANIFEST`, exit non-zero on failure, idempotent.
 - Native deps that must build on the VPS → stage source into `dist/`, build on
   the box (like husky).
-- No native deps → build locally, copy the bundle (like tet-fit).
+- No native deps → build locally, copy the bundle (like forge).
 
 ## 4. `apps/foo/deploy.sh`
 
@@ -54,7 +54,7 @@ ansible_app foo -e "dist_dir=$clone/dist" "$@"
 
 ## 5. `apps/foo/ansible/playbook.yml`
 
-Use an existing app as a template (`husky` for "build on host", `tet-fit` for
+Use an existing app as a template (`husky` for "build on host", `forge` for
 "copy built bundle", `prelander` for static). The skeleton:
 
 ```yaml

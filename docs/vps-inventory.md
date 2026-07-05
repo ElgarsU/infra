@@ -30,15 +30,15 @@ new app or port change updates this file as part of the deploy contract.
 | **sentry** | (via `track.elgars.eu/sentry-health`) | — | 8091 (health) | `sentry.service` | SQLite `/var/lib/sentry/state.db` | `sentry` (+`enduro-data`) | tracker, common |
 | **husky** | `husky.elgars.eu` | — | 3001 | `husky.service` | SQLite `/opt/husky/data/husky.sqlite` (+reads sentry's) | `husky` (+`enduro-data`) | tracker, sentry, caddy, Node |
 | **discord-scraper** | — (no web) | — | — | `discord-scraper.service` + `.timer` | SQLite `/opt/discord-scraper/data/scraper.db` | `discord-scraper` | — |
-| **tet-fit** | `fit.elgars.eu` | — | 3000 | `tet-training.service` | JSON files `/opt/tet-training/data` | `www-data` | caddy, Node |
+| **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /
   17:20 / 22:00 Europe/Riga), `Type=oneshot`, no long-running process, no ports.
-- `tet-fit`'s unit/dir/service are named **`tet-training`** (historical); the
-  repo + infra app are **`tet-fit`** (`git@github.com:ElgarsU/tet-fit.git`).
+- `forge`'s unit/dir/service, repo, and infra app are all named **`forge`**
+  (`git@github.com:ElgarsU/forge.git`). Physical + moto training tracker.
 - `honda` is a **standalone** Nuxt SSR maintenance log for a Honda CRF300L (a
   gift build, km-only, no live tracking). Same stack as husky but with none of
   husky's couplings — no Traccar, no `enduro-data`, no cross-app deps.
@@ -81,13 +81,13 @@ Notes:
 - sshd drop-in: `PermitRootLogin prohibit-password`, no password/keyboard auth,
   `MaxAuthTries 3`, `AllowUsers root`.
 - `unattended-upgrades` with auto-reboot at 03:00.
-- Node.js 20 via NodeSource (for husky + tet-fit).
+- Node.js 20 via NodeSource (for husky + forge).
 
 ### Cloudflare DNS conventions
 - `track.elgars.eu` — **orange-cloud** (proxied) → `89.167.98.246`. Web UI.
 - `gps.elgars.eu` — **gray-cloud** (DNS-only A record) → `89.167.98.246`. Raw
   TCP `5027` device ingest (FMC880); can't be proxied.
-- `husky.elgars.eu`, `fit.elgars.eu` — orange-cloud → `89.167.98.246`.
+- `husky.elgars.eu`, `forge.elgars.eu` — orange-cloud → `89.167.98.246`.
 - `elgars.eu` + `www.elgars.eu` — orange-cloud (apex) → `89.167.98.246`.
 - MX / mail records (Gandi) must stay untouched.
 
@@ -112,7 +112,7 @@ Notes:
 
 ## Conventions for a new app
 
-- **Ports:** localhost app servers use the 3000-block (3000 tet-fit, 3001
+- **Ports:** localhost app servers use the 3000-block (3000 forge, 3001
   husky). Pick the next free (3002, 3003, …). Bind `127.0.0.1` only; never open
   in ufw unless it's a raw public listener like Traccar's 5027.
 - **Subdomain:** `<app>.elgars.eu`, orange-cloud in Cloudflare → `89.167.98.246`.

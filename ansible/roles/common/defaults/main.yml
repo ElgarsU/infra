@@ -4,5 +4,5 @@
 # its user is in it" contract. sentry + husky add their users with append:true.
 enduro_data_group: enduro-data
 
-# Node.js major version installed via NodeSource (husky SSR + tet-fit need it).
+# Node.js major version installed via NodeSource (husky SSR + forge need it).
 node_major: "20"

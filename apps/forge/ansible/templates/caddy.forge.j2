@@ -1,12 +1,12 @@
-# Managed by infra apps/tet-fit/ansible/playbook.yml.
+# Managed by infra apps/forge/ansible/playbook.yml.
 # DNS-01 TLS challenge (required behind Cloudflare orange-cloud) + shared
 # security_headers snippet.
 
-fit.elgars.eu {
+forge.elgars.eu {
     tls {
         dns cloudflare {env.CF_API_TOKEN}
     }
     encode gzip
     import security_headers
-    reverse_proxy 127.0.0.1:{{ fit_internal_port }}
+    reverse_proxy 127.0.0.1:{{ forge_internal_port }}
 }

@@ -2,7 +2,7 @@
 # ── Base packages ─────────────────────────────────────────────────────────
 # unzip      — tracker (Traccar release zip)
 # sqlite3    — sentry/husky/discord-scraper state DBs (CLI for ops/backups)
-# rsync      — app deploys (husky/tet-fit .output sync)
+# rsync      — app deploys (husky/forge .output sync)
 # build-essential + python3 — husky's better-sqlite3 native build on the host
 # jq/curl    — cf-ufw-update.sh + general ops
 # fail2ban   — sshd jail (configured in hardening.yml)
@@ -23,7 +23,7 @@
     cache_valid_time: 3600
 
 # ── Node.js 20 (NodeSource) ───────────────────────────────────────────────
-# husky (Nuxt SSR) and tet-fit (Nuxt SPA + Nitro) both run under Node on the
+# husky (Nuxt SSR) and forge (Nuxt SPA + Nitro) both run under Node on the
 # VPS. A fresh-VPS rebuild (./setup.sh) needs Node present before those apps
 # deploy, so we install it here in the base layer rather than per-app.
 

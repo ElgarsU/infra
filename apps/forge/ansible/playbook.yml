@@ -1,32 +1,29 @@
 ---
 # ──────────────────────────────────────────────────────────────────────────
-# tet-fit app play.
+# forge app play.
 #
-#   ../../deploy.sh tet-fit        (from the infra repo root)
+#   ../../deploy.sh forge        (from the infra repo root)
 #
 # Nuxt 3 SPA (ssr:false) + Nitro Node server. State is JSON files in
-# /opt/tet-training/data (no DB). Built LOCALLY (no native deps) and the
+# /opt/forge/data (no DB). Built LOCALLY (no native deps) and the
 # .output bundle is rsynced to the VPS; runs under www-data on 127.0.0.1:3000,
-# reverse-proxied by Caddy at fit.elgars.eu.
+# reverse-proxied by Caddy at forge.elgars.eu.
 #
-# Names note: unit/dir/service are "tet-training" (preserved from the original
-# deploy); the infra app + repo are "tet-fit".
-#
-# Secret from the environment: TET_AUTH_HASH (secrets/tet-fit.env). The app
+# Secret from the environment: FORGE_AUTH_HASH (secrets/forge.env). The app
 # reads this from process.env (migrated out of server/api/login.post.ts).
 # ──────────────────────────────────────────────────────────────────────────
 
-- name: tet-fit
+- name: forge
   hosts: vps
   become: true
   gather_facts: true
   vars:
-    app_dir: /opt/tet-training
-    data_dir: /opt/tet-training/data
-    service_name: tet-training
+    app_dir: /opt/forge
+    data_dir: /opt/forge/data
+    service_name: forge
     app_user: www-data
-    fit_internal_port: 3000
-    tet_auth_hash: "{{ lookup('env', 'TET_AUTH_HASH') }}"
+    forge_internal_port: 3000
+    forge_auth_hash: "{{ lookup('env', 'FORGE_AUTH_HASH') }}"
 
   pre_tasks:
     - name: Assert built .output was passed (dist_dir)
@@ -36,7 +33,7 @@
           - (dist_dir ~ '/.output/server/index.mjs') is file
         fail_msg: >-
           Built bundle not found at {{ dist_dir | default('(unset)') }}/.output.
-          Run via ./deploy.sh tet-fit (clones tet-fit, runs build.sh, passes dist_dir).
+          Run via ./deploy.sh forge (clones forge, runs build.sh, passes dist_dir).
       delegate_to: localhost
       become: false
 
@@ -58,11 +55,11 @@
     - name: Validate auth-hash secret is filled in
       ansible.builtin.assert:
         that:
-          - tet_auth_hash | length == 64
-          - "'PASTE' not in tet_auth_hash"
+          - forge_auth_hash | length == 64
+          - "'PASTE' not in forge_auth_hash"
         fail_msg: >-
-          TET_AUTH_HASH must be the 64-char SHA-256 of "user:password".
-          Set it in secrets/tet-fit.env.
+          FORGE_AUTH_HASH must be the 64-char SHA-256 of "user:password".
+          Set it in secrets/forge.env.
 
   tasks:
     - name: Ensure app + data directories exist
@@ -110,42 +107,42 @@
       ansible.builtin.copy:
         dest: "{{ app_dir }}/.env"
         content: |
-          # Managed by infra apps/tet-fit/ansible/playbook.yml. Mode 0640.
-          TET_AUTH_HASH={{ tet_auth_hash }}
+          # Managed by infra apps/forge/ansible/playbook.yml. Mode 0640.
+          FORGE_AUTH_HASH={{ forge_auth_hash }}
         owner: root
         group: "{{ app_user }}"
         mode: "0640"
       no_log: true
-      notify: restart tet-training
+      notify: restart forge
 
     - name: Install systemd unit
       ansible.builtin.template:
-        src: tet-training.service.j2
+        src: forge.service.j2
         dest: "/etc/systemd/system/{{ service_name }}.service"
         owner: root
         group: root
         mode: "0644"
       notify:
         - daemon reload
-        - restart tet-training
+        - restart forge
 
-    - name: Enable tet-training service
+    - name: Enable forge service
       ansible.builtin.systemd:
         name: "{{ service_name }}"
         enabled: true
         daemon_reload: true
 
-    - name: Render fit.elgars.eu Caddy site
+    - name: Render forge.elgars.eu Caddy site
       ansible.builtin.template:
-        src: caddy.fit.j2
-        dest: /etc/caddy/sites.d/fit.elgars.eu.caddy
+        src: caddy.forge.j2
+        dest: /etc/caddy/sites.d/forge.elgars.eu.caddy
         owner: root
         group: root
         mode: "0644"
-      register: fit_site_change
+      register: forge_site_change
 
     - name: Validate Caddy + reload (if site changed)
-      when: fit_site_change.changed
+      when: forge_site_change.changed
       ansible.builtin.shell:
         cmd: |
           set -a
@@ -156,7 +153,7 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Restart tet-training
+    - name: Restart forge
       ansible.builtin.systemd:
         name: "{{ service_name }}"
         state: restarted
@@ -168,7 +165,7 @@
 
     - name: Health check (HTTP 200 on root)
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ fit_internal_port }}"
+        url: "http://127.0.0.1:{{ forge_internal_port }}"
         status_code: 200
         return_content: false
       register: health
@@ -185,7 +182,7 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: restart tet-training
+    - name: restart forge
       ansible.builtin.systemd:
         name: "{{ service_name }}"
         state: restarted

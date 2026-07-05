@@ -13,7 +13,7 @@ everything about *how it's deployed* lives here.
 - VPS: Hetzner **CAX11** (ARM64), Ubuntu 24.04, `89.167.98.246`, Helsinki.
 - Apps deployed here: **tracker** (Traccar GPS server), **sentry** (Go anti-theft
   alerter), **husky** (Nuxt SSR dashboard), **discord-scraper** (Python scraper,
-  timer), **tet-fit** (Nuxt SPA), **prelander** (static site), **honda** (Nuxt
+  timer), **forge** (Nuxt SPA), **prelander** (static site), **honda** (Nuxt
   SSR CRF300L maintenance log — standalone, no cross-app deps).
 - Full live layout: `docs/vps-inventory.md`.
 
@@ -52,15 +52,14 @@ everything about *how it's deployed* lives here.
     `sentry/deploy.sh` also sources `tracker.env`.
   - `HUSKY_TRACCAR_USERNAME` / `_PASSWORD` / `_API_TOKEN` → `secrets/tracker.env`
     only (tracker *creates* that Traccar user); `husky/deploy.sh` sources it.
-  - App-specific prefixes (`SENTRY_TRACCAR_`, `HUSKY_AUTH_`, `TET_AUTH_`) keep
+  - App-specific prefixes (`SENTRY_TRACCAR_`, `HUSKY_AUTH_`, `FORGE_AUTH_`) keep
     the cross-sourced env files collision-free.
 - **Always deploy `main`** (v1: no commit pinning). `clone_repo` does
   `git clone --depth 1 git@github.com:ElgarsU/<repo>.git`.
 - **Idempotent everywhere.** Markers (`.installed-version-*`, `.admin-replaced`),
   `creates:`, `WHERE NOT EXISTS`, `state: present`. Safe to re-run.
 - **Don't reuse names across apps.** Each app's systemd unit / system user /
-  secrets file is named after the app. (Exception preserved from history:
-  tet-fit's unit + dir are `tet-training`.)
+  secrets file is named after the app.
 - **`enduro-data` group** is created by the `common` role (the single owner).
   Each app that needs it (`sentry`, `husky`) adds *its own* user with
   `append: true` **and asserts membership**. Never add another app's user from
@@ -77,7 +76,7 @@ spec + reference scripts: `docs/build-sh-contract.md`. Summary:
 | sentry | Go cross-compile → `dist/sentry-linux-arm64` | control node (laptop) |
 | husky | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 | discord-scraper | stage source → `dist/` | **on the VPS** (venv + pip) |
-| tet-fit | `npm ci && npm run build` → `dist/.output` | control node (no native deps) |
+| forge | `npm ci && npm run build` → `dist/.output` | control node (no native deps) |
 | prelander | copy static files → `dist/` | n/a (static) |
 | honda | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 
@@ -95,7 +94,7 @@ single `build.sh` builds sentry. tracker needs no build.
 - **Pushover flows to both** tracker (Traccar `notificator.pushover.*`) and sentry
   (`SENTRY_PUSHOVER_*`). One source: `tracker.env`.
 - **Deploy order** (encoded in `setup.sh`): tracker → sentry → husky →
-  discord-scraper → tet-fit → prelander.
+  discord-scraper → forge → prelander.
 
 ## Gotchas (preserved from the source repos — keep them)
 
@@ -135,8 +134,8 @@ These are also commented at the relevant code. Don't "clean them up."
    won't load on Linux. `build.sh` only stages source; `npm ci`/`npm run build`
    run on the box (with `HOME` pointed into the app dir since the `husky` user
    has no home).
-9. **tet-fit `STATE_DIR`.** The app falls back to `.` if `STATE_DIR` is unset.
-   The systemd unit must set `Environment=STATE_DIR=/opt/tet-training/data`.
+9. **forge `STATE_DIR`.** The app falls back to `.` if `STATE_DIR` is unset.
+   The systemd unit must set `Environment=STATE_DIR=/opt/forge/data`.
 10. **`--check` artifacts.** Read-only verification commands have
     `check_mode: false` so dry-runs work; `uri` health-checks are skipped under
     `--check` and will "fail" the `until` — that's a check-mode artifact, not a

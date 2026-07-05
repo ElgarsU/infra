@@ -31,7 +31,7 @@ Because the VPS is ARM64 Linux and the control node is an ARM64 Mac, apps fall
 into two shapes:
 
 - **Build locally, copy the artifact.** Works when the artifact is
-  platform-independent or cross-compiled: `tet-fit` (Nuxt bundle, no native
+  platform-independent or cross-compiled: `forge` (Nuxt bundle, no native
   deps) and `sentry` (Go `CGO_ENABLED=0` cross-compile).
 - **Stage source, build on the VPS.** Required when a native module must be
   compiled for the target: `husky` (`better-sqlite3`). Here `build.sh` just
@@ -97,11 +97,11 @@ rsync -a \
 echo "Staged $(wc -l < "$DIST/MANIFEST") files into $DIST"
 ```
 
-### `tet-fit/build.sh` — build locally
+### `forge/build.sh` — build locally
 > Needs: Node 20. Output: `dist/.output` (Nitro server bundle).
 ```bash
 #!/usr/bin/env bash
-# Build the tet-fit Nuxt bundle locally (no native deps) and stage .output.
+# Build the forge Nuxt bundle locally (no native deps) and stage .output.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
