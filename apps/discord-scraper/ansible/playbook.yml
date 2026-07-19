@@ -6,13 +6,13 @@
 #
 # Scheduled scraper (systemd timer, 4×/day, Europe/Riga). Type=oneshot service
 # runs `python -m src.main`, posts new/bumped/gone ss.com 2-stroke enduro
-# listings (Husqvarna + KTM) to Discord, exits. No long-running process, no
+# listings (Husqvarna + KTM + Sherco/Beta/GasGas) to Discord, exits. No long-running process, no
 # inbound ports, local SQLite.
 #
 # Build model: deploy.sh clones discord-scraper, runs build.sh (stages source
 # into dist/), passes dist_dir. The venv is built on the VPS (host interpreter).
-# Secrets from the environment: DISCORD_WEBHOOK_HUSQVARNA_FE, DISCORD_WEBHOOK_KTM_EXC
-# (secrets/discord-scraper.env).
+# Secrets from the environment: DISCORD_WEBHOOK_HUSQVARNA_FE, DISCORD_WEBHOOK_KTM_EXC,
+# DISCORD_WEBHOOK_SHERCO_BETA (secrets/discord-scraper.env).
 # ──────────────────────────────────────────────────────────────────────────
 
 - name: discord-scraper
@@ -24,6 +24,7 @@
     app_user: discord-scraper
     discord_webhook_husqvarna_fe: "{{ lookup('env', 'DISCORD_WEBHOOK_HUSQVARNA_FE') }}"
     discord_webhook_ktm_exc: "{{ lookup('env', 'DISCORD_WEBHOOK_KTM_EXC') }}"
+    discord_webhook_sherco_beta: "{{ lookup('env', 'DISCORD_WEBHOOK_SHERCO_BETA') }}"
 
   pre_tasks:
     - name: Assert staged source was passed (dist_dir)
@@ -46,7 +47,10 @@
           - discord_webhook_ktm_exc | length > 20
           - "'PASTE' not in discord_webhook_ktm_exc"
           - "'/ID/TOKEN' not in discord_webhook_ktm_exc"
-        fail_msg: "DISCORD_WEBHOOK_HUSQVARNA_FE / DISCORD_WEBHOOK_KTM_EXC missing/placeholder in secrets/discord-scraper.env."
+          - discord_webhook_sherco_beta | length > 20
+          - "'PASTE' not in discord_webhook_sherco_beta"
+          - "'/ID/TOKEN' not in discord_webhook_sherco_beta"
+        fail_msg: "DISCORD_WEBHOOK_HUSQVARNA_FE / DISCORD_WEBHOOK_KTM_EXC / DISCORD_WEBHOOK_SHERCO_BETA missing/placeholder in secrets/discord-scraper.env."
 
   tasks:
     - name: Install system packages
