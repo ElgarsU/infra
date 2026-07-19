@@ -5,12 +5,14 @@
 #   ../../deploy.sh discord-scraper        (from the infra repo root)
 #
 # Scheduled scraper (systemd timer, 4×/day, Europe/Riga). Type=oneshot service
-# runs `python -m src.main`, posts new/bumped/gone ss.com Husqvarna FE listings
-# to Discord, exits. No long-running process, no inbound ports, local SQLite.
+# runs `python -m src.main`, posts new/bumped/gone ss.com 2-stroke enduro
+# listings (Husqvarna + KTM) to Discord, exits. No long-running process, no
+# inbound ports, local SQLite.
 #
 # Build model: deploy.sh clones discord-scraper, runs build.sh (stages source
 # into dist/), passes dist_dir. The venv is built on the VPS (host interpreter).
-# Secret from the environment: DISCORD_WEBHOOK_HUSQVARNA_FE (secrets/discord-scraper.env).
+# Secrets from the environment: DISCORD_WEBHOOK_HUSQVARNA_FE, DISCORD_WEBHOOK_KTM_EXC
+# (secrets/discord-scraper.env).
 # ──────────────────────────────────────────────────────────────────────────
 
 - name: discord-scraper
@@ -21,6 +23,7 @@
     app_dir: /opt/discord-scraper
     app_user: discord-scraper
     discord_webhook_husqvarna_fe: "{{ lookup('env', 'DISCORD_WEBHOOK_HUSQVARNA_FE') }}"
+    discord_webhook_ktm_exc: "{{ lookup('env', 'DISCORD_WEBHOOK_KTM_EXC') }}"
 
   pre_tasks:
     - name: Assert staged source was passed (dist_dir)
@@ -34,13 +37,16 @@
       delegate_to: localhost
       become: false
 
-    - name: Validate webhook secret is filled in
+    - name: Validate webhook secrets are filled in
       ansible.builtin.assert:
         that:
           - discord_webhook_husqvarna_fe | length > 20
           - "'PASTE' not in discord_webhook_husqvarna_fe"
           - "'/ID/TOKEN' not in discord_webhook_husqvarna_fe"
-        fail_msg: "DISCORD_WEBHOOK_HUSQVARNA_FE missing/placeholder in secrets/discord-scraper.env."
+          - discord_webhook_ktm_exc | length > 20
+          - "'PASTE' not in discord_webhook_ktm_exc"
+          - "'/ID/TOKEN' not in discord_webhook_ktm_exc"
+        fail_msg: "DISCORD_WEBHOOK_HUSQVARNA_FE / DISCORD_WEBHOOK_KTM_EXC missing/placeholder in secrets/discord-scraper.env."
 
   tasks:
     - name: Install system packages

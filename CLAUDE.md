@@ -38,6 +38,10 @@ everything about *how it's deployed* lives here.
 
 ## Conventions (do not break these)
 
+- **`git pull` this infra repo before every deploy.** `./deploy.sh` runs entirely
+  from the *local* checkout (scripts, Ansible templates, secrets) — only the app
+  source is pulled fresh (`clone_repo` clones the app's `main`). A stale infra
+  checkout silently deploys old config. Always `git pull --ff-only` here first.
 - **Secrets = shell `.env` + `lookup('env',…)`.** `secrets/<app>.env` (gitignored,
   values single-quoted so bash `source` keeps `$`-strings like bcrypt hashes
   literal). `deploy.sh` does `set -a; source …; set +a` then runs Ansible;

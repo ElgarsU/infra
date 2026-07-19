@@ -10,6 +10,14 @@ secrets live here.
 
 ## Quick start
 
+> **Always `git pull` this infra repo first.** Deploys run from your *local*
+> checkout of infra (scripts, Ansible, secrets templates) — an out-of-date
+> checkout deploys stale config. Pull before every deploy:
+>
+> ```bash
+> git -C "$(git rev-parse --show-toplevel)" pull --ff-only
+> ```
+
 ```bash
 # Deploy one app (clone its main → build.sh → Ansible)
 ./deploy.sh husky
@@ -48,6 +56,8 @@ CLAUDE.md              architecture, conventions, gotchas (read this)
 
 ## How a deploy works
 
+First, **`git pull` this infra repo** so your local checkout matches the remote
+(deploys run from local files — stale checkout, stale deploy). Then
 `./deploy.sh <app>` runs `apps/<app>/deploy.sh`, which:
 1. sources `secrets/<app>.env` (+ any shared env files) into the environment;
 2. clones the app repo's **`main`** into a temp dir (v1: always main, no pinning);
