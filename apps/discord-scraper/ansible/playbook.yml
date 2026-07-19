@@ -25,6 +25,7 @@
     discord_webhook_husqvarna_fe: "{{ lookup('env', 'DISCORD_WEBHOOK_HUSQVARNA_FE') }}"
     discord_webhook_ktm_exc: "{{ lookup('env', 'DISCORD_WEBHOOK_KTM_EXC') }}"
     discord_webhook_sherco_beta: "{{ lookup('env', 'DISCORD_WEBHOOK_SHERCO_BETA') }}"
+    discord_webhook_125cc: "{{ lookup('env', 'DISCORD_WEBHOOK_125CC') }}"
 
   pre_tasks:
     - name: Assert staged source was passed (dist_dir)
@@ -50,7 +51,10 @@
           - discord_webhook_sherco_beta | length > 20
           - "'PASTE' not in discord_webhook_sherco_beta"
           - "'/ID/TOKEN' not in discord_webhook_sherco_beta"
-        fail_msg: "DISCORD_WEBHOOK_HUSQVARNA_FE / DISCORD_WEBHOOK_KTM_EXC / DISCORD_WEBHOOK_SHERCO_BETA missing/placeholder in secrets/discord-scraper.env."
+          - discord_webhook_125cc | length > 20
+          - "'PASTE' not in discord_webhook_125cc"
+          - "'/ID/TOKEN' not in discord_webhook_125cc"
+        fail_msg: "A DISCORD_WEBHOOK_* var is missing/placeholder in secrets/discord-scraper.env."
 
   tasks:
     - name: Install system packages
