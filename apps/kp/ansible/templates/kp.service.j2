@@ -1,0 +1,24 @@
+# Managed by infra apps/kp/ansible/playbook.yml.
+[Unit]
+Description=KP · gym trainer booking and client management
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ kp_user }}
+Group={{ kp_user }}
+WorkingDirectory={{ kp_app_dir }}/app
+EnvironmentFile={{ kp_app_dir }}/.env
+ExecStart=/usr/bin/node {{ kp_app_dir }}/app/node_modules/next/dist/bin/next start -H 127.0.0.1 -p {{ kp_internal_port }}
+Restart=always
+RestartSec=5
+# Light sandboxing — app writes its data dir and Next's runtime cache, nothing else
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ kp_data_dir }} {{ kp_app_dir }}/app/.next
+
+[Install]
+WantedBy=multi-user.target

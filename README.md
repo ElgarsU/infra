@@ -6,7 +6,7 @@ secrets live here.
 
 - **VPS:** Hetzner CAX11 (ARM64), Ubuntu 24.04, `89.167.98.246`, Helsinki.
 - **Apps:** `tracker` (Traccar), `sentry`, `husky`, `discord-scraper`,
-  `forge`, `prelander`, `honda`.
+  `forge`, `prelander`, `honda`, `kp`.
 
 ## Quick start
 

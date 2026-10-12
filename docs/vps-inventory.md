@@ -33,6 +33,7 @@ new app or port change updates this file as part of the deploy contract.
 | **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
+| **kp** | `hyrox.elgars.eu` | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (no backups yet) | `kp` | caddy, Node |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /
@@ -42,7 +43,10 @@ Notes:
 - `honda` is a **standalone** Nuxt SSR maintenance log for a Honda CRF300L (a
   gift build, km-only, no live tracking). Same stack as husky but with none of
   husky's couplings — no Traccar, no `enduro-data`, no cross-app deps.
-- All localhost ports (8082, 8091, 3000, 3001, 3002) and Postgres `5432` bind to
+- `kp` is a **standalone** Next.js (React) booking / client management app for
+  a gym trainer — the first non-Nuxt Node app here. Public booking pages, trainer area behind a
+  single password (`KP_TRAINER_PASSWORD`). Prototype: no database backups yet.
+- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 
 ## Shared infrastructure
@@ -113,7 +117,7 @@ Notes:
 ## Conventions for a new app
 
 - **Ports:** localhost app servers use the 3000-block (3000 forge, 3001
-  husky). Pick the next free (3002, 3003, …). Bind `127.0.0.1` only; never open
+  husky, 3002 honda, 3003 kp). Pick the next free (3004, …). Bind `127.0.0.1` only; never open
   in ufw unless it's a raw public listener like Traccar's 5027.
 - **Subdomain:** `<app>.elgars.eu`, orange-cloud in Cloudflare → `89.167.98.246`.
 - **System user:** a dedicated system user named after the app

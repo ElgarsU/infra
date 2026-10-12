@@ -35,8 +35,8 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Apps in dependency order. tracker provides Traccar + Postgres `traccar` DB;
 # sentry depends on tracker; husky depends on tracker (Traccar) + sentry
-# (enduro-data group). The rest are independent (honda is fully standalone).
-APPS=(tracker sentry husky discord-scraper forge prelander honda)
+# (enduro-data group). The rest are independent (honda and kp are fully standalone).
+APPS=(tracker sentry husky discord-scraper forge prelander honda kp)
 
 step "Base VPS provisioning (ansible/site.yml)"
 # CF_API_TOKEN for the caddy role comes from secrets/common.env.

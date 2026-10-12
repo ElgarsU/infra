@@ -1,0 +1,10 @@
+# Managed by infra apps/kp/ansible/playbook.yml.
+
+hyrox.elgars.eu {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    encode gzip
+    import security_headers
+    reverse_proxy 127.0.0.1:{{ kp_internal_port }}
+}
