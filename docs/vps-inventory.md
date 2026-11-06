@@ -33,7 +33,7 @@ new app or port change updates this file as part of the deploy contract.
 | **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
-| **kp** | `hyrox.elgars.eu` | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (no backups yet) | `kp` | caddy, Node |
+| **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (no backups yet) | `kp` | caddy, Node |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /

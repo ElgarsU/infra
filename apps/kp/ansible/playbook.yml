@@ -132,17 +132,25 @@
         enabled: true
         daemon_reload: true
 
-    - name: Render hyrox.elgars.eu Caddy site
+    - name: Render kpfitness.lv Caddy site
       ansible.builtin.template:
         src: caddy.kp.j2
-        dest: /etc/caddy/sites.d/hyrox.elgars.eu.caddy
+        dest: /etc/caddy/sites.d/kpfitness.lv.caddy
         owner: root
         group: root
         mode: "0644"
       register: kp_site_change
 
+    # hyrox.elgars.eu now lives in kpfitness.lv.caddy (as a redirect); two
+    # site files for one host would fail caddy validate.
+    - name: Remove old hyrox.elgars.eu Caddy site
+      ansible.builtin.file:
+        path: /etc/caddy/sites.d/hyrox.elgars.eu.caddy
+        state: absent
+      register: kp_old_site
+
     - name: Validate Caddy + reload (if site changed)
-      when: kp_site_change.changed
+      when: kp_site_change.changed or kp_old_site.changed
       ansible.builtin.shell:
         cmd: |
           set -e
@@ -226,9 +234,10 @@
       ansible.builtin.pause:
         seconds: 3
 
-    - name: Health check (HTTP 200 from /)
+    # The app runs under basePath /kp (Caddy serves the landing page at /).
+    - name: Health check (HTTP 200 from /kp)
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ kp_internal_port }}/"
+        url: "http://127.0.0.1:{{ kp_internal_port }}/kp"
         status_code: 200
         return_content: false
       register: health
@@ -238,7 +247,7 @@
 
     - name: Deploy summary
       ansible.builtin.debug:
-        msg: "Deployed. kp.service active. / → {{ health.status }}."
+        msg: "Deployed. kp.service active. /kp → {{ health.status }}."
 
   handlers:
     - name: daemon reload

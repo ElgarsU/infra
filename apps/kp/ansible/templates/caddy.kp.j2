@@ -1,10 +1,36 @@
 # Managed by infra apps/kp/ansible/playbook.yml.
+# kpfitness.lv: static landing page at /, the Next.js app (basePath /kp) at /kp.
+# www and the old hyrox.elgars.eu redirect here. DNS-01 TLS (works behind
+# Cloudflare orange-cloud).
+
+kpfitness.lv {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    encode zstd gzip
+    import security_headers
+
+    @app path /kp /kp/*
+    handle @app {
+        reverse_proxy 127.0.0.1:{{ kp_internal_port }}
+    }
+    handle {
+        root * {{ kp_app_dir }}/app/landing
+        file_server
+        header Cache-Control "public, max-age=3600"
+    }
+}
+
+www.kpfitness.lv {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    redir https://kpfitness.lv{uri} permanent
+}
 
 hyrox.elgars.eu {
     tls {
         dns cloudflare {env.CF_API_TOKEN}
     }
-    encode gzip
-    import security_headers
-    reverse_proxy 127.0.0.1:{{ kp_internal_port }}
+    redir https://kpfitness.lv/kp{uri} permanent
 }
