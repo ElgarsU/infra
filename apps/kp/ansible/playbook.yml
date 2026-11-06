@@ -35,6 +35,9 @@
     kp_data_dir: /opt/kp/data
     kp_user: kp
     kp_internal_port: 3003
+    # Static landing page (kp's landing/) served by Caddy at kpfitness.lv/.
+    # Its own root:caddy dir: /opt/kp/app is 0700, so Caddy can't read there.
+    kp_landing_root: /var/www/kpfitness
 
   pre_tasks:
     - name: Assert OS is Ubuntu 24.04 ARM64
@@ -179,6 +182,29 @@
           - "--exclude=.next"
           - "--exclude=.npm-cache"
           - "--exclude=.data"
+
+    - name: Ensure landing web root exists
+      ansible.builtin.file:
+        path: "{{ kp_landing_root }}"
+        state: directory
+        owner: root
+        group: caddy
+        mode: "0755"
+
+    - name: Deploy landing page files
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/landing/"
+        dest: "{{ kp_landing_root }}/"
+        delete: true
+
+    - name: Fix ownership and modes on landing web root (root:caddy)
+      ansible.builtin.file:
+        path: "{{ kp_landing_root }}"
+        state: directory
+        recurse: true
+        owner: root
+        group: caddy
+        mode: "u=rwX,g=rX,o=rX"
 
     - name: Fix ownership on /opt/kp/app
       ansible.builtin.file:

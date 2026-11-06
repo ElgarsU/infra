@@ -15,7 +15,7 @@ kpfitness.lv {
         reverse_proxy 127.0.0.1:{{ kp_internal_port }}
     }
     handle {
-        root * {{ kp_app_dir }}/app/landing
+        root * {{ kp_landing_root }}
         file_server
         header Cache-Control "public, max-age=3600"
     }
