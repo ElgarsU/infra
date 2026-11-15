@@ -33,7 +33,7 @@ new app or port change updates this file as part of the deploy contract.
 | **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
-| **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (no backups yet) | `kp` | caddy, Node |
+| **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (backed up on every deploy to `/opt/kp/backups/`, newest 2 kept) | `kp` | caddy, Node |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /
@@ -45,7 +45,8 @@ Notes:
   husky's couplings — no Traccar, no `enduro-data`, no cross-app deps.
 - `kp` is a **standalone** Next.js (React) booking / client management app for
   a gym trainer — the first non-Nuxt Node app here. Public booking pages, trainer area behind a
-  single password (`KP_TRAINER_PASSWORD`). Prototype: no database backups yet.
+  single password (`KP_TRAINER_PASSWORD`). Each deploy backs up the database first
+  (`sqlite3 .backup` + integrity check, newest 2 kept in `/opt/kp/backups/`); a failed backup stops the deploy.
 - All localhost ports (8082, 8091, 3000, 3001, 3002, 3003) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 

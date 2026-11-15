@@ -14,7 +14,11 @@
 # Mac-built artifact won't load on Linux, so `npm ci` + `npm run build` run
 # ON THE VPS. build.sh (in the kp repo) only STAGES clean source into dist/.
 #
-# No database backups yet (prototype) — add before real client data goes in.
+# Database backups: every deploy first copies the live SQLite database to
+# /opt/kp/backups/kp-<UTC time>.sqlite and keeps the newest 2 (the oldest goes
+# when a third is made). If the backup fails, the deploy stops before anything
+# changes. To restore one: stop kp, copy it over /opt/kp/data/kp.sqlite
+# (remove kp.sqlite-wal and kp.sqlite-shm), chown kp:kp, start kp.
 #
 # Depends on:
 #   • base roles (common): Node 20, build-essential + python3
@@ -33,6 +37,8 @@
 
     kp_app_dir: /opt/kp
     kp_data_dir: /opt/kp/data
+    kp_backup_dir: /opt/kp/backups
+    kp_backups_kept: 2
     kp_user: kp
     kp_internal_port: 3003
     # Static landing page (kp's landing/) served by Caddy at kpfitness.lv/.
@@ -164,6 +170,49 @@
           systemctl reload caddy
         executable: /bin/bash
       changed_when: true
+
+    # ════════════════════════════════════════════════════════════════════
+    # [BACKUP] the live database, before anything of the app changes
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Ensure sqlite3 CLI (for consistent online backups)
+      ansible.builtin.apt:
+        name: sqlite3
+        state: present
+
+    - name: Ensure backup directory
+      ansible.builtin.file:
+        path: "{{ kp_backup_dir }}"
+        state: directory
+        owner: "{{ kp_user }}"
+        group: "{{ kp_user }}"
+        mode: "0700"
+
+    # sqlite3 .backup takes a consistent copy while the app keeps running (WAL
+    # included). The copy must pass integrity_check, else the deploy stops here.
+    # Then only the newest {{ kp_backups_kept }} backups are kept.
+    - name: Back up the database (keep the newest {{ kp_backups_kept }})
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          db="{{ kp_data_dir }}/kp.sqlite"
+          dir="{{ kp_backup_dir }}"
+          if [ ! -f "$db" ]; then echo "no database yet, nothing to back up"; exit 0; fi
+          out="$dir/kp-$(date -u +%Y%m%d-%H%M%S).sqlite"
+          sqlite3 "$db" ".backup '$out'"
+          [ "$(sqlite3 "$out" 'pragma integrity_check;')" = "ok" ] || { echo "backup $out failed integrity_check" >&2; exit 1; }
+          chown {{ kp_user }}:{{ kp_user }} "$out"
+          chmod 0600 "$out"
+          ls -1t "$dir"/kp-*.sqlite | tail -n +{{ kp_backups_kept + 1 }} | xargs -r rm -f --
+          echo "backed up to $out"
+          ls -lh "$dir"
+        executable: /bin/bash
+      register: kp_backup
+      changed_when: "'backed up to' in kp_backup.stdout"
+
+    - name: Backup summary
+      ansible.builtin.debug:
+        msg: "{{ kp_backup.stdout_lines }}"
 
     # ════════════════════════════════════════════════════════════════════
     # [DEPLOY] stage source → build on host → restart
