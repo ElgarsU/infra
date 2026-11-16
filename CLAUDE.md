@@ -15,7 +15,8 @@ everything about *how it's deployed* lives here.
   alerter), **husky** (Nuxt SSR dashboard), **discord-scraper** (Python scraper,
   timer), **forge** (Nuxt SPA), **prelander** (static site), **honda** (Nuxt
   SSR CRF300L maintenance log — standalone, no cross-app deps), **kp** (Next.js
-  gym trainer booking/client app — standalone, React not Nuxt).
+  gym trainer booking/client app — standalone, React not Nuxt), **cat-nest**
+  (read-only Viessmann boiler logger — standalone Python stdlib service).
 - Full live layout: `docs/vps-inventory.md`.
 
 ## Architecture
@@ -85,6 +86,7 @@ spec + reference scripts: `docs/build-sh-contract.md`. Summary:
 | prelander | copy static files → `dist/` | n/a (static) |
 | honda | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 | kp | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
+| cat-nest | run unit tests, stage `catnest/` package → `dist/` | n/a (stdlib Python, host `python3`) |
 
 `enduro-tracking` is one repo holding two infra apps (tracker + sentry); its
 single `build.sh` builds sentry. tracker needs no build.
@@ -100,7 +102,7 @@ single `build.sh` builds sentry. tracker needs no build.
 - **Pushover flows to both** tracker (Traccar `notificator.pushover.*`) and sentry
   (`SENTRY_PUSHOVER_*`). One source: `tracker.env`.
 - **Deploy order** (encoded in `setup.sh`): tracker → sentry → husky →
-  discord-scraper → forge → prelander.
+  discord-scraper → forge → prelander → honda → kp → cat-nest.
 
 ## Gotchas (preserved from the source repos — keep them)
 

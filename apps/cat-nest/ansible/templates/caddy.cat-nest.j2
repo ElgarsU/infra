@@ -1,0 +1,20 @@
+# Managed by infra apps/cat-nest/ansible/playbook.yml.
+# Mode 0640 root:caddy: this file holds the secret status path.
+#
+# Only one URL is served: the status page UptimeRobot watches. Caddy rewrites it
+# to /status on the logger's 127.0.0.1 listener. Everything else is a 404.
+{{ cn_host }} {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    import security_headers
+
+    handle /{{ cn_status_path }}/vitodens-status {
+        rewrite * /status
+        reverse_proxy 127.0.0.1:{{ cn_port }}
+    }
+
+    handle {
+        respond 404
+    }
+}

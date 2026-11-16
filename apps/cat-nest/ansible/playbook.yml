@@ -1,0 +1,235 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# cat-nest app play: read-only Viessmann Vitodens boiler logger.
+#
+#   ../../deploy.sh cat-nest        (from the infra repo root)
+#
+# Long-running Python service (stdlib only, host python3, no venv). Polls the
+# Viessmann IoT API every 2 min (GET only), writes daily files under
+# /opt/cat-nest/data, and serves a plain-text status page on 127.0.0.1:3004
+# that Caddy exposes at https://nest.elgars.eu/<CATNEST_STATUS_PATH>/vitodens-status
+# for UptimeRobot. Also pings healthchecks.io. No inbound ports.
+#
+# One self-contained folder:
+#   /opt/cat-nest/app    code, root-owned, read-only to the service
+#   /opt/cat-nest/data   data (cat-nest, 0750)
+#   /opt/cat-nest/state  token, state file, lock (cat-nest, 0700)
+#   /opt/cat-nest/.env   config + secrets (cat-nest, 0600)
+#
+# The OAuth login is interactive and NOT done here: after the first deploy run
+# `cat-nest login` over an SSH tunnel (see the cat-nest README). Until then the
+# status page shows VITODENS_FAULT / AUTH.
+#
+# Secrets from the environment (secrets/cat-nest.env):
+#   VIESSMANN_CLIENT_ID, HC_PING_URL, CATNEST_STATUS_PATH
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: cat-nest
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    cn_client_id: "{{ lookup('env', 'VIESSMANN_CLIENT_ID') }}"
+    cn_hc_ping_url: "{{ lookup('env', 'HC_PING_URL') }}"
+    cn_status_path: "{{ lookup('env', 'CATNEST_STATUS_PATH') }}"
+
+    cn_user: cat-nest
+    cn_dir: /opt/cat-nest
+    cn_app_dir: /opt/cat-nest/app
+    cn_data_dir: /opt/cat-nest/data
+    cn_state_dir: /opt/cat-nest/state
+    cn_port: 3004
+    cn_host: nest.elgars.eu
+
+  pre_tasks:
+    - name: Assert staged package was passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - (dist_dir ~ '/catnest/__main__.py') is file
+        fail_msg: >-
+          Staged package not found at {{ dist_dir | default('(unset)') }}.
+          Run via ./deploy.sh cat-nest.
+      delegate_to: localhost
+      become: false
+
+    - name: Assert base caddy role has run
+      ansible.builtin.stat:
+        path: /etc/caddy/cloudflare.env
+      register: cn_cf_env
+
+    - name: Fail if base infra is missing
+      ansible.builtin.assert:
+        that: [cn_cf_env.stat.exists]
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first."
+
+    - name: Validate secrets are filled in
+      ansible.builtin.assert:
+        that:
+          - cn_client_id | length >= 20
+          - "'PASTE' not in cn_client_id"
+          - cn_hc_ping_url is match('^https://hc-ping\\.com/[0-9a-f-]{36}$')
+          - cn_status_path is match('^[A-Za-z0-9_-]{32,}$')
+        fail_msg: >-
+          VIESSMANN_CLIENT_ID / HC_PING_URL / CATNEST_STATUS_PATH missing or malformed
+          in secrets/cat-nest.env (values not shown).
+        quiet: true
+      no_log: true
+
+  tasks:
+    - name: Install system packages
+      ansible.builtin.apt:
+        name: [python3, tzdata, rsync]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Assert host python3 is 3.10+
+      ansible.builtin.command: /usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 10)'
+      changed_when: false
+
+    - name: Ensure cat-nest system user exists
+      ansible.builtin.user:
+        name: "{{ cn_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ cn_dir }}"
+        create_home: false
+
+    - name: Ensure directories exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ cn_dir }}", owner: root, mode: "0755" }
+        - { path: "{{ cn_app_dir }}", owner: root, mode: "0755" }
+        - { path: "{{ cn_data_dir }}", owner: "{{ cn_user }}", mode: "0750" }
+        - { path: "{{ cn_state_dir }}", owner: "{{ cn_user }}", mode: "0700" }
+
+    - name: Sync staged package (root-owned, read-only to the service)
+      ansible.posix.synchronize:
+        src: "{{ dist_dir }}/"
+        dest: "{{ cn_app_dir }}/"
+        delete: true
+        owner: false
+        group: false
+        rsync_opts:
+          - "--exclude=MANIFEST"
+          - "--exclude=__pycache__"
+          - "--chmod=D755,F644"
+      register: cn_code
+
+    - name: Install env file
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ cn_dir }}/.env"
+        owner: "{{ cn_user }}"
+        group: "{{ cn_user }}"
+        mode: "0600"
+      no_log: true
+      register: cn_env
+
+    - name: Install CLI wrapper /usr/local/bin/cat-nest
+      ansible.builtin.template:
+        src: cat-nest-cli.j2
+        dest: /usr/local/bin/cat-nest
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install systemd unit
+      ansible.builtin.template:
+        src: cat-nest.service.j2
+        dest: /etc/systemd/system/cat-nest.service
+        mode: "0644"
+      register: cn_unit
+
+    - name: Enable and start cat-nest
+      ansible.builtin.systemd:
+        name: cat-nest
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Restart cat-nest (code, env or unit changed)
+      when: cn_code.changed or cn_env.changed or cn_unit.changed
+      ansible.builtin.systemd:
+        name: cat-nest
+        state: restarted
+
+    - name: Wait for the local status endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ cn_port }}/status"
+        return_content: true
+      register: cn_status
+      until: cn_status.status | default(0) == 200 and (cn_status.content | default('')) is match('^VITODENS_(OK|FAULT)\n')
+      retries: 15
+      delay: 2
+      when: not ansible_check_mode
+
+    # ════════════════════════════════════════════════════════════════════
+    # Caddy: nest.elgars.eu → only the secret status path, everything else 404
+    # ════════════════════════════════════════════════════════════════════
+    - name: Render nest.elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.cat-nest.j2
+        dest: /etc/caddy/sites.d/{{ cn_host }}.caddy
+        owner: root
+        group: caddy
+        mode: "0640"
+        backup: true
+      no_log: true
+      register: cn_site
+
+    - name: Validate Caddy + reload, roll the site file back on failure
+      when: cn_site.changed
+      block:
+        - name: caddy validate + reload
+          ansible.builtin.shell:
+            cmd: |
+              set -a
+              # shellcheck disable=SC1091
+              source /etc/caddy/cloudflare.env
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+              systemctl reload caddy
+            executable: /bin/bash
+          changed_when: true
+      rescue:
+        - name: Restore previous site file
+          when: cn_site.backup_file is defined
+          ansible.builtin.copy:
+            src: "{{ cn_site.backup_file }}"
+            dest: /etc/caddy/sites.d/{{ cn_host }}.caddy
+            remote_src: true
+            owner: root
+            group: caddy
+            mode: "0640"
+        - name: Remove new site file (no previous version)
+          when: cn_site.backup_file is not defined
+          ansible.builtin.file:
+            path: /etc/caddy/sites.d/{{ cn_host }}.caddy
+            state: absent
+        - name: Abort, Caddy validation failed
+          ansible.builtin.fail:
+            msg: "Caddy did not validate with the {{ cn_host }} site; it was rolled back. Other sites are untouched."
+
+    - name: Move Caddy backups out of sites.d (they hold the secret path and would be imported)
+      ansible.builtin.shell: |
+        set -e
+        mkdir -p /etc/caddy/backups && chmod 0750 /etc/caddy/backups
+        for f in /etc/caddy/sites.d/{{ cn_host }}.caddy.*~; do
+          [ -e "$f" ] && mv "$f" /etc/caddy/backups/
+        done
+        true
+      changed_when: false
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg:
+          - "cat-nest deployed. Status now: {{ (cn_status.content | default('?')).splitlines() | first | default('?') }}"
+          - "Public status: https://{{ cn_host }}/<CATNEST_STATUS_PATH>/vitodens-status"
+          - "First time / AUTH fault: ssh -L 4200:127.0.0.1:4200 root@{{ ansible_host }} then run: cat-nest login"
+          - "Logs: journalctl -u cat-nest -f    Status: cat-nest status"

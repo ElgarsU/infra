@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Managed by infra apps/cat-nest/ansible/playbook.yml.
+# cat-nest CLI (login | status | test-fault | export | summarize) with the
+# service's env, always run as the {{ cn_user }} user so files keep the right owner.
+set -euo pipefail
+set -a
+# shellcheck disable=SC1091
+source {{ cn_dir }}/.env
+set +a
+export PYTHONPATH={{ cn_app_dir }}
+cd {{ cn_app_dir }}
+if [ "$(id -u)" -eq 0 ]; then
+  exec runuser -u {{ cn_user }} -- /usr/bin/python3 -m catnest "$@"
+fi
+exec /usr/bin/python3 -m catnest "$@"

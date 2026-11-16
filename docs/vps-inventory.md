@@ -33,6 +33,7 @@ new app or port change updates this file as part of the deploy contract.
 | **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
+| **cat-nest** | `nest.elgars.eu` (only `/<CATNEST_STATUS_PATH>/vitodens-status`, all else 404) | — | 3004 (status) | `cat-nest.service` | daily files `/opt/cat-nest/data` (gzip JSONL/CSV) | `cat-nest` | caddy, host python3 |
 | **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (backed up on every deploy to `/opt/kp/backups/`, newest 2 kept) | `kp` | caddy, Node |
 
 Notes:
@@ -47,7 +48,16 @@ Notes:
   a gym trainer — the first non-Nuxt Node app here. Public booking pages, trainer area behind a
   single password (`KP_TRAINER_PASSWORD`). Each deploy backs up the database first
   (`sqlite3 .backup` + integrity check, newest 2 kept in `/opt/kp/backups/`); a failed backup stops the deploy.
-- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003) and Postgres `5432` bind to
+- `cat-nest` is a **read-only** Viessmann Vitodens boiler logger (Python stdlib,
+  host `python3`, no venv). Long-running; polls the Viessmann IoT API every 2 min
+  (GET only, ~816 of ~1,450 calls/day quota shared with the same client ID on the
+  Mac — never run both). Code root-owned in `/opt/cat-nest/app`, data
+  `/opt/cat-nest/data`, token/state/lock `/opt/cat-nest/state` (0700). Status page
+  on `127.0.0.1:3004/status`, public only at `nest.elgars.eu/<secret path>/vitodens-status`
+  (UptimeRobot keyword `VITODENS_OK`), plus a healthchecks.io dead-man's switch.
+  OAuth login is interactive: `ssh -L 4200:127.0.0.1:4200 root@…` then `cat-nest login`
+  (the 4200 listener exists only while `login` runs, never opened in ufw).
+- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003, 3004) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 
 ## Shared infrastructure
@@ -92,13 +102,14 @@ Notes:
 - `track.elgars.eu` — **orange-cloud** (proxied) → `89.167.98.246`. Web UI.
 - `gps.elgars.eu` — **gray-cloud** (DNS-only A record) → `89.167.98.246`. Raw
   TCP `5027` device ingest (FMC880); can't be proxied.
-- `husky.elgars.eu`, `forge.elgars.eu` — orange-cloud → `89.167.98.246`.
+- `husky.elgars.eu`, `forge.elgars.eu`, `nest.elgars.eu` — orange-cloud → `89.167.98.246`.
 - `elgars.eu` + `www.elgars.eu` — orange-cloud (apex) → `89.167.98.246`.
 - MX / mail records (Gandi) must stay untouched.
 
 ### Monitoring
 - **UptimeRobot** (external): probes `https://track.elgars.eu/sentry-health`
-  (sentry liveness) and the app subdomains.
+  (sentry liveness), the app subdomains, and the cat-nest status page (keyword
+  monitor). cat-nest also pings **healthchecks.io** (independent dead-man's switch).
 
 ## Cross-app coordination
 
@@ -118,7 +129,7 @@ Notes:
 ## Conventions for a new app
 
 - **Ports:** localhost app servers use the 3000-block (3000 forge, 3001
-  husky, 3002 honda, 3003 kp). Pick the next free (3004, …). Bind `127.0.0.1` only; never open
+  husky, 3002 honda, 3003 kp, 3004 cat-nest). Pick the next free (3005, …). Bind `127.0.0.1` only; never open
   in ufw unless it's a raw public listener like Traccar's 5027.
 - **Subdomain:** `<app>.elgars.eu`, orange-cloud in Cloudflare → `89.167.98.246`.
 - **System user:** a dedicated system user named after the app
