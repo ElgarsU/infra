@@ -119,8 +119,17 @@
         rsync_opts:
           - "--exclude=MANIFEST"
           - "--exclude=__pycache__"
-          - "--chmod=D755,F644"
       register: cn_code
+
+    # (macOS rsync has no --chmod, so permissions are normalised here.)
+    - name: Normalise code ownership and permissions (root, world-readable, not writable)
+      ansible.builtin.file:
+        path: "{{ cn_app_dir }}"
+        state: directory
+        recurse: true
+        owner: root
+        group: root
+        mode: "u=rwX,go=rX"
 
     - name: Install env file
       ansible.builtin.template:
