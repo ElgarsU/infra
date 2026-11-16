@@ -34,6 +34,9 @@
   vars:
     # ── Secrets (from the environment) ──────────────────────────────────
     kp_trainer_password: "{{ lookup('env', 'KP_TRAINER_PASSWORD') }}"
+    # Cloudflare Turnstile (optional: empty = off). From the Cloudflare dashboard.
+    kp_turnstile_site_key: "{{ lookup('env', 'KP_TURNSTILE_SITE_KEY') }}"
+    kp_turnstile_secret_key: "{{ lookup('env', 'KP_TURNSTILE_SECRET_KEY') }}"
 
     kp_app_dir: /opt/kp
     kp_data_dir: /opt/kp/data
