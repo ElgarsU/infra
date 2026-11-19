@@ -33,7 +33,7 @@ new app or port change updates this file as part of the deploy contract.
 | **forge** | `forge.elgars.eu` | — | 3000 | `forge.service` | JSON files `/opt/forge/data` | `www-data` | caddy, Node |
 | **prelander** | `elgars.eu` + `www.elgars.eu` | — | — (Caddy file_server) | none | none | `caddy` (files `root:caddy`) | caddy |
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
-| **cat-nest** | `nest.elgars.eu` (only `/<CATNEST_STATUS_PATH>/vitodens-status`, all else 404) | — | 3004 (status) | `cat-nest.service` | daily files `/opt/cat-nest/data` (gzip JSONL/CSV) | `cat-nest` | caddy, host python3 |
+| **cat-nest** | `nest.elgars.eu` (only `/<CATNEST_STATUS_PATH>/vitodens-status` and `/ewelink-status`, all else 404) | — | 3004, 3005 (status) | `cat-nest.service`, `cat-nest-ewelink.service` | daily files `/opt/cat-nest/data` (gzip JSONL/CSV) | `cat-nest` | caddy, host python3 |
 | **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (backed up on every deploy to `/opt/kp/backups/`, newest 2 kept) | `kp` | caddy, Node |
 
 Notes:
@@ -57,7 +57,15 @@ Notes:
   (UptimeRobot keyword `VITODENS_OK`), plus a healthchecks.io dead-man's switch.
   OAuth login is interactive: `ssh -L 4200:127.0.0.1:4200 root@…` then `cat-nest login`
   (the 4200 listener exists only while `login` runs, never opened in ufw).
-- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003, 3004) and Postgres `5432` bind to
+- `cat-nest-ewelink` is the second, independent service from the same code: a
+  **read-only** eWeLink (SONOFF ZBBridge-P + SNZB Zigbee sensors) room-sensor
+  logger. Polls the eWeLink cloud device list every 5 min (exact GET/POST
+  allowlist, no device control), writes `/opt/cat-nest/data/ewelink`, state in
+  `/opt/cat-nest/state/ewelink`; its unit can write only those two dirs. Status on
+  `127.0.0.1:3005/status`, public at `nest.elgars.eu/<secret path>/ewelink-status`
+  (keyword `EWELINK_OK`), own healthchecks.io check. Login: `ssh -L 4201:127.0.0.1:4201`
+  then `cat-nest ewelink login`. The eWeLink developer app expires yearly.
+- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003, 3004, 3005) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 
 ## Shared infrastructure
@@ -108,8 +116,9 @@ Notes:
 
 ### Monitoring
 - **UptimeRobot** (external): probes `https://track.elgars.eu/sentry-health`
-  (sentry liveness), the app subdomains, and the cat-nest status page (keyword
-  monitor). cat-nest also pings **healthchecks.io** (independent dead-man's switch).
+  (sentry liveness), the app subdomains, and the two cat-nest status pages (keyword
+  monitors). Both cat-nest services also ping their own **healthchecks.io** check
+  (independent dead-man's switches).
 
 ## Cross-app coordination
 
@@ -129,7 +138,7 @@ Notes:
 ## Conventions for a new app
 
 - **Ports:** localhost app servers use the 3000-block (3000 forge, 3001
-  husky, 3002 honda, 3003 kp, 3004 cat-nest). Pick the next free (3005, …). Bind `127.0.0.1` only; never open
+  husky, 3002 honda, 3003 kp, 3004 cat-nest, 3005 cat-nest-ewelink). Pick the next free (3006, …). Bind `127.0.0.1` only; never open
   in ufw unless it's a raw public listener like Traccar's 5027.
 - **Subdomain:** `<app>.elgars.eu`, orange-cloud in Cloudflare → `89.167.98.246`.
 - **System user:** a dedicated system user named after the app

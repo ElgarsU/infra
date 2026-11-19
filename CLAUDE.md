@@ -16,7 +16,8 @@ everything about *how it's deployed* lives here.
   timer), **forge** (Nuxt SPA), **prelander** (static site), **honda** (Nuxt
   SSR CRF300L maintenance log — standalone, no cross-app deps), **kp** (Next.js
   gym trainer booking/client app — standalone, React not Nuxt), **cat-nest**
-  (read-only Viessmann boiler logger — standalone Python stdlib service).
+  (read-only Viessmann boiler logger + eWeLink room-sensor logger — two
+  standalone Python stdlib services from one repo).
 - Full live layout: `docs/vps-inventory.md`.
 
 ## Architecture

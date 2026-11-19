@@ -1,6 +1,7 @@
 ---
 # ──────────────────────────────────────────────────────────────────────────
-# cat-nest app play: read-only Viessmann Vitodens boiler logger.
+# cat-nest app play: read-only Viessmann Vitodens boiler logger and the
+# eWeLink room-sensor logger (SONOFF Zigbee sensors via the eWeLink cloud API).
 #
 #   ../../deploy.sh cat-nest        (from the infra repo root)
 #
@@ -9,6 +10,12 @@
 # /opt/cat-nest/data, and serves a plain-text status page on 127.0.0.1:3004
 # that Caddy exposes at https://nest.elgars.eu/<CATNEST_STATUS_PATH>/vitodens-status
 # for UptimeRobot. Also pings healthchecks.io. No inbound ports.
+#
+# Second, independent service from the same code: cat-nest-ewelink polls the
+# eWeLink device list every 5 min (GET only), writes under data/ewelink, serves
+# its status on 127.0.0.1:3005 → https://nest.elgars.eu/<CATNEST_STATUS_PATH>/ewelink-status
+# and pings its own healthchecks.io check (HC_PING_URL_EW). Its unit can only
+# write data/ewelink and state/ewelink.
 #
 # One self-contained folder:
 #   /opt/cat-nest/app    code, root-owned, read-only to the service
@@ -21,7 +28,8 @@
 # status page shows VITODENS_FAULT / AUTH.
 #
 # Secrets from the environment (secrets/cat-nest.env):
-#   VIESSMANN_CLIENT_ID, HC_PING_URL, CATNEST_STATUS_PATH
+#   VIESSMANN_CLIENT_ID, HC_PING_URL, CATNEST_STATUS_PATH,
+#   EWELINK_APP_ID, EWELINK_APP_SECRET, EWELINK_REGION, HC_PING_URL_EW
 # ──────────────────────────────────────────────────────────────────────────
 
 - name: cat-nest
@@ -32,6 +40,10 @@
     cn_client_id: "{{ lookup('env', 'VIESSMANN_CLIENT_ID') }}"
     cn_hc_ping_url: "{{ lookup('env', 'HC_PING_URL') }}"
     cn_status_path: "{{ lookup('env', 'CATNEST_STATUS_PATH') }}"
+    ew_app_id: "{{ lookup('env', 'EWELINK_APP_ID') }}"
+    ew_app_secret: "{{ lookup('env', 'EWELINK_APP_SECRET') }}"
+    ew_region: "{{ lookup('env', 'EWELINK_REGION') | default('eu', true) }}"
+    ew_hc_ping_url: "{{ lookup('env', 'HC_PING_URL_EW') }}"
 
     cn_user: cat-nest
     cn_dir: /opt/cat-nest
@@ -39,6 +51,9 @@
     cn_data_dir: /opt/cat-nest/data
     cn_state_dir: /opt/cat-nest/state
     cn_port: 3004
+    ew_port: 3005
+    ew_data_dir: /opt/cat-nest/data/ewelink
+    ew_state_dir: /opt/cat-nest/state/ewelink
     cn_host: nest.elgars.eu
 
   pre_tasks:
@@ -70,8 +85,14 @@
           - "'PASTE' not in cn_client_id"
           - cn_hc_ping_url is match('^https://hc-ping\\.com/[0-9a-f-]{36}$')
           - cn_status_path is match('^[A-Za-z0-9_-]{32,}$')
+          - ew_app_id is match('^[A-Za-z0-9]{16,}$')
+          - ew_app_secret is match('^[A-Za-z0-9]{16,}$')
+          - ew_region in ['eu', 'us', 'as', 'cn']
+          - ew_hc_ping_url is match('^https://hc-ping\\.com/[0-9a-f-]{36}$')
+          - ew_hc_ping_url != cn_hc_ping_url
         fail_msg: >-
-          VIESSMANN_CLIENT_ID / HC_PING_URL / CATNEST_STATUS_PATH missing or malformed
+          VIESSMANN_CLIENT_ID / HC_PING_URL / CATNEST_STATUS_PATH / EWELINK_APP_ID /
+          EWELINK_APP_SECRET / EWELINK_REGION / HC_PING_URL_EW missing or malformed
           in secrets/cat-nest.env (values not shown).
         quiet: true
       no_log: true
@@ -108,6 +129,8 @@
         - { path: "{{ cn_app_dir }}", owner: root, mode: "0755" }
         - { path: "{{ cn_data_dir }}", owner: "{{ cn_user }}", mode: "0750" }
         - { path: "{{ cn_state_dir }}", owner: "{{ cn_user }}", mode: "0700" }
+        - { path: "{{ ew_data_dir }}", owner: "{{ cn_user }}", mode: "0750" }
+        - { path: "{{ ew_state_dir }}", owner: "{{ cn_user }}", mode: "0700" }
 
     - name: Sync staged package (root-owned, read-only to the service)
       ansible.posix.synchronize:
@@ -156,6 +179,13 @@
         mode: "0644"
       register: cn_unit
 
+    - name: Install eWeLink systemd unit
+      ansible.builtin.template:
+        src: cat-nest-ewelink.service.j2
+        dest: /etc/systemd/system/cat-nest-ewelink.service
+        mode: "0644"
+      register: ew_unit
+
     - name: Enable and start cat-nest
       ansible.builtin.systemd:
         name: cat-nest
@@ -175,6 +205,29 @@
         return_content: true
       register: cn_status
       until: cn_status.status | default(0) == 200 and (cn_status.content | default('')) is match('^VITODENS_(OK|FAULT)\n')
+      retries: 15
+      delay: 2
+      when: not ansible_check_mode
+
+    - name: Enable and start cat-nest-ewelink
+      ansible.builtin.systemd:
+        name: cat-nest-ewelink
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Restart cat-nest-ewelink (code, env or unit changed)
+      when: cn_code.changed or cn_env.changed or ew_unit.changed
+      ansible.builtin.systemd:
+        name: cat-nest-ewelink
+        state: restarted
+
+    - name: Wait for the local eWeLink status endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ ew_port }}/status"
+        return_content: true
+      register: ew_status
+      until: ew_status.status | default(0) == 200 and (ew_status.content | default('')) is match('^EWELINK_(OK|FAULT)\n')
       retries: 15
       delay: 2
       when: not ansible_check_mode
@@ -242,3 +295,7 @@
           - "Public status: https://{{ cn_host }}/<CATNEST_STATUS_PATH>/vitodens-status"
           - "First time / AUTH fault: ssh -L 4200:127.0.0.1:4200 root@{{ ansible_host }} then run: cat-nest login"
           - "Logs: journalctl -u cat-nest -f    Status: cat-nest status"
+          - "cat-nest-ewelink status now: {{ (ew_status.content | default('?')).splitlines() | first | default('?') }}"
+          - "Public status: https://{{ cn_host }}/<CATNEST_STATUS_PATH>/ewelink-status"
+          - "First time / AUTH fault: ssh -L 4201:127.0.0.1:4201 root@{{ ansible_host }} then run: cat-nest ewelink login"
+          - "Logs: journalctl -u cat-nest-ewelink -f    Status: cat-nest ewelink status"

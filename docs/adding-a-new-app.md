@@ -9,7 +9,7 @@ a Node server on `127.0.0.1:3002` behind `foo.elgars.eu`. Adjust to taste.
 ## 1. Pick the slots
 
 - **Port:** next free localhost port in the 3000-block → `3002` in this example (taken: 3000=forge,
-  3001=husky, 3002=honda, 3003=kp, 3004=cat-nest; real next free is 3005). Bind `127.0.0.1` only.
+  3001=husky, 3002=honda, 3003=kp, 3004=cat-nest, 3005=cat-nest-ewelink; real next free is 3006). Bind `127.0.0.1` only.
 - **Subdomain:** `foo.elgars.eu`. Create a Cloudflare DNS record, **orange-cloud**,
   → `89.167.98.246`.
 - **System user:** `foo` (dedicated, `nologin`, `/opt/foo`).

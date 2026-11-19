@@ -1,0 +1,48 @@
+# Managed by infra apps/cat-nest/ansible/playbook.yml. Do not edit on the VPS.
+[Unit]
+Description=cat-nest-ewelink - read-only eWeLink room-sensor logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ cn_user }}
+Group={{ cn_user }}
+WorkingDirectory={{ cn_app_dir }}
+EnvironmentFile={{ cn_dir }}/.env
+Environment=PYTHONPATH={{ cn_app_dir }}
+ExecStart=/usr/bin/python3 -m catnest ewelink run
+Restart=always
+RestartSec=30
+TimeoutStopSec=20
+UMask=0027
+
+# Sandboxing. Code is root-owned and read-only; the service writes only its
+# eWeLink data and state dirs. Outbound HTTPS + its 127.0.0.1 status port only.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ ew_data_dir }} {{ ew_state_dir }}
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
