@@ -150,6 +150,21 @@
         mode: "0644"
       register: now_site_change
 
+    # Right after rendering, so a later failure can't leave the new site file
+    # written but never loaded (the next run would see no change).
+    - name: Validate Caddy + reload (if site changed)
+      when: now_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
     # ════════════════════════════════════════════════════════════════════
     # [BACKUP] the live database, before anything of the app changes
     # ════════════════════════════════════════════════════════════════════
@@ -203,15 +218,23 @@
         group: caddy
         mode: "0755"
 
-    # --delete-after: new assets and index.html land before old assets go, so
-    # a page loaded mid-deploy never points at a file that was just removed.
-    - name: Sync frontend to /var/www/now
+    # Two passes so a page loaded mid-deploy never points at a removed file:
+    # first add the new assets + index.html, then delete what is stale.
+    # (macOS rsync has no --delete-after, which would do this in one pass.)
+    - name: Copy new frontend files to /var/www/now
+      ansible.posix.synchronize:
+        src: "{{ now_web_src }}"
+        dest: "{{ now_web_root }}/"
+        owner: false
+        group: false
+
+    - name: Remove stale frontend files
       ansible.posix.synchronize:
         src: "{{ now_web_src }}"
         dest: "{{ now_web_root }}/"
         delete: true
-        rsync_opts:
-          - "--delete-after"
+        owner: false
+        group: false
 
     - name: Fix ownership and modes on web root (root:caddy)
       ansible.builtin.file:
@@ -231,19 +254,6 @@
 
     - name: Apply pending restarts
       ansible.builtin.meta: flush_handlers
-
-    - name: Validate Caddy + reload (if site changed)
-      when: now_site_change.changed
-      ansible.builtin.shell:
-        cmd: |
-          set -e
-          set -a
-          # shellcheck disable=SC1091
-          source /etc/caddy/cloudflare.env
-          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          systemctl reload caddy
-        executable: /bin/bash
-      changed_when: true
 
     - name: Health check (API + database)
       ansible.builtin.uri:
