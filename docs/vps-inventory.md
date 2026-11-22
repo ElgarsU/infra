@@ -35,6 +35,7 @@ new app or port change updates this file as part of the deploy contract.
 | **honda** | `honda.elgars.eu` | — | 3002 | `honda.service` | SQLite `/opt/honda/data/honda.sqlite` | `honda` | caddy, Node |
 | **cat-nest** | `nest.elgars.eu` (only `/<CATNEST_STATUS_PATH>/vitodens-status` and `/ewelink-status`, all else 404) | — | 3004, 3005 (status) | `cat-nest.service`, `cat-nest-ewelink.service` | daily files `/opt/cat-nest/data` (gzip JSONL/CSV) | `cat-nest` | caddy, host python3 |
 | **kp** | `kpfitness.lv` (landing `/`, app `/kp`; www + `hyrox.elgars.eu` redirect) | — | 3003 | `kp.service` | SQLite `/opt/kp/data/kp.sqlite` (backed up on every deploy to `/opt/kp/backups/`, newest 2 kept) | `kp` | caddy, Node |
+| **now** | `now.elgars.eu` (static React build from `/var/www/now`; `/api` + `/auth/*` proxied) | — | 3006 | `now.service` | SQLite `/opt/now/data/now.sqlite` (backed up on every deploy to `/opt/now/backups/`, newest 2 kept) | `now` | caddy |
 
 Notes:
 - `discord-scraper` is a **scheduled** job (systemd timer: 08:00 / 12:40 /
@@ -65,7 +66,7 @@ Notes:
   `127.0.0.1:3005/status`, public at `nest.elgars.eu/<secret path>/ewelink-status`
   (keyword `EWELINK_OK`), own healthchecks.io check. Login: `ssh -L 4201:127.0.0.1:4201`
   then `cat-nest ewelink login`. The eWeLink developer app expires yearly.
-- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003, 3004, 3005) and Postgres `5432` bind to
+- All localhost ports (8082, 8091, 3000, 3001, 3002, 3003, 3004, 3005, 3006) and Postgres `5432` bind to
   `127.0.0.1` only and are reverse-proxied (or not exposed). Never opened in ufw.
 
 ## Shared infrastructure
@@ -110,7 +111,7 @@ Notes:
 - `track.elgars.eu` — **orange-cloud** (proxied) → `89.167.98.246`. Web UI.
 - `gps.elgars.eu` — **gray-cloud** (DNS-only A record) → `89.167.98.246`. Raw
   TCP `5027` device ingest (FMC880); can't be proxied.
-- `husky.elgars.eu`, `forge.elgars.eu`, `nest.elgars.eu` — orange-cloud → `89.167.98.246`.
+- `husky.elgars.eu`, `forge.elgars.eu`, `nest.elgars.eu`, `now.elgars.eu` — orange-cloud → `89.167.98.246`.
 - `elgars.eu` + `www.elgars.eu` — orange-cloud (apex) → `89.167.98.246`.
 - MX / mail records (Gandi) must stay untouched.
 
@@ -138,7 +139,7 @@ Notes:
 ## Conventions for a new app
 
 - **Ports:** localhost app servers use the 3000-block (3000 forge, 3001
-  husky, 3002 honda, 3003 kp, 3004 cat-nest, 3005 cat-nest-ewelink). Pick the next free (3006, …). Bind `127.0.0.1` only; never open
+  husky, 3002 honda, 3003 kp, 3004 cat-nest, 3005 cat-nest-ewelink, 3006 now). Pick the next free (3007, …). Bind `127.0.0.1` only; never open
   in ufw unless it's a raw public listener like Traccar's 5027.
 - **Subdomain:** `<app>.elgars.eu`, orange-cloud in Cloudflare → `89.167.98.246`.
 - **System user:** a dedicated system user named after the app

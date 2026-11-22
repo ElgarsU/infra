@@ -1,0 +1,270 @@
+---
+# ──────────────────────────────────────────────────────────────────────────
+# Now app play — calm personal project planner at now.elgars.eu.
+#
+#   ../../deploy.sh now        (from the infra repo root)
+#
+# Build model (like sentry): deploy.sh clones `now`, runs its build.sh (tests,
+# Go cross-compile → dist/now-linux-arm64, Vite build → dist/web/) and passes
+# dist_dir. This play COPIES the prebuilt artifacts; nothing builds on the box.
+#
+#   /opt/now/now            API binary (root:root 0755), listens 127.0.0.1:3006
+#   /opt/now/.env           config + password hash (root:now 0640)
+#   /opt/now/data/          SQLite database (now:now 0700) — created empty on first start
+#   /opt/now/backups/       copies of the database, taken before every deploy
+#   /var/www/now/           static frontend (root:caddy), served by Caddy
+#
+# Database backups: like kp, every deploy first copies the live database to
+# /opt/now/backups/now-<UTC time>.sqlite and keeps the newest 2. If the backup
+# fails, the deploy stops before anything changes. To restore one: stop now,
+# copy it over /opt/now/data/now.sqlite (remove now.sqlite-wal / -shm),
+# chown now:now, start now.
+#
+# Depends on: base roles (caddy: cloudflare.env + security_headers snippet).
+# Secrets from the environment (secrets/now.env): NOW_PASSWORD_HASH.
+# ──────────────────────────────────────────────────────────────────────────
+
+- name: Now
+  hosts: vps
+  become: true
+  gather_facts: true
+  vars:
+    # ── Secrets (from the environment) ──────────────────────────────────
+    now_password_hash: "{{ lookup('env', 'NOW_PASSWORD_HASH') }}"
+
+    now_domain: now.elgars.eu
+    now_user: now
+    now_app_dir: /opt/now
+    now_data_dir: /opt/now/data
+    now_backup_dir: /opt/now/backups
+    now_backups_kept: 2
+    now_web_root: /var/www/now
+    now_internal_port: 3006
+
+    now_binary_src: "{{ dist_dir | default('') }}/now-linux-arm64"
+    now_web_src: "{{ dist_dir | default('') }}/web/"
+
+  pre_tasks:
+    - name: Assert OS is Ubuntu 24.04 ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "Pinned to Ubuntu 24.04 ARM64 (the binary is linux/arm64)."
+
+    - name: Assert build artifacts were passed (dist_dir)
+      ansible.builtin.assert:
+        that:
+          - dist_dir is defined
+          - now_binary_src is file
+          - (dist_dir ~ '/web/index.html') is file
+        fail_msg: >-
+          Build output not found at {{ dist_dir | default('(unset)') }}.
+          Run via ./deploy.sh now (clones now, runs build.sh, passes dist_dir).
+      delegate_to: localhost
+      become: false
+
+    - name: Stat base-infra artifacts (Caddy snippet, cloudflare.env)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: base_infra
+      loop:
+        - /etc/caddy/snippets/security.caddy
+        - /etc/caddy/cloudflare.env
+
+    - name: Assert base roles have run
+      ansible.builtin.assert:
+        that:
+          - base_infra.results[0].stat.exists
+          - base_infra.results[1].stat.exists
+        fail_msg: "Run ./setup.sh (or ansible/site.yml) first — needs the Caddy base."
+
+    - name: Validate secrets are filled in
+      ansible.builtin.assert:
+        that:
+          - now_password_hash is match('^pbkdf2-sha256\$')
+        fail_msg: >-
+          NOW_PASSWORD_HASH (secrets/now.env) must be a hash from
+          `now -hash-password`, not a plain password.
+
+  tasks:
+    # ════════════════════════════════════════════════════════════════════
+    # [BOOTSTRAP] user, directories, config, systemd unit, Caddy site
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Create now system user
+      ansible.builtin.user:
+        name: "{{ now_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ now_app_dir }}"
+        create_home: false
+
+    - name: Ensure /opt/now
+      ansible.builtin.file:
+        path: "{{ now_app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure data and backup directories (now:now 0700)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ now_user }}"
+        group: "{{ now_user }}"
+        mode: "0700"
+      loop:
+        - "{{ now_data_dir }}"
+        - "{{ now_backup_dir }}"
+
+    - name: Write /opt/now/.env (0640 root:now)
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ now_app_dir }}/.env"
+        owner: root
+        group: "{{ now_user }}"
+        mode: "0640"
+      no_log: true
+      notify: restart now
+
+    - name: Install now systemd unit
+      ansible.builtin.template:
+        src: now.service.j2
+        dest: /etc/systemd/system/now.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - daemon reload
+        - restart now
+
+    - name: Render now.elgars.eu Caddy site
+      ansible.builtin.template:
+        src: caddy.now.j2
+        dest: /etc/caddy/sites.d/now.elgars.eu.caddy
+        owner: root
+        group: root
+        mode: "0644"
+      register: now_site_change
+
+    # ════════════════════════════════════════════════════════════════════
+    # [BACKUP] the live database, before anything of the app changes
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Ensure sqlite3 CLI (for consistent online backups)
+      ansible.builtin.apt:
+        name: sqlite3
+        state: present
+
+    - name: Back up the database (keep the newest {{ now_backups_kept }})
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          db="{{ now_data_dir }}/now.sqlite"
+          dir="{{ now_backup_dir }}"
+          if [ ! -f "$db" ]; then echo "no database yet, nothing to back up"; exit 0; fi
+          out="$dir/now-$(date -u +%Y%m%d-%H%M%S).sqlite"
+          sqlite3 "$db" ".backup '$out'"
+          [ "$(sqlite3 "$out" 'pragma integrity_check;')" = "ok" ] || { echo "backup $out failed integrity_check" >&2; exit 1; }
+          chown {{ now_user }}:{{ now_user }} "$out"
+          chmod 0600 "$out"
+          ls -1t "$dir"/now-*.sqlite | tail -n +{{ now_backups_kept + 1 }} | xargs -r rm -f --
+          echo "backed up to $out"
+          ls -lh "$dir"
+        executable: /bin/bash
+      register: now_backup
+      changed_when: "'backed up to' in now_backup.stdout"
+
+    - name: Backup summary
+      ansible.builtin.debug:
+        msg: "{{ now_backup.stdout_lines }}"
+
+    # ════════════════════════════════════════════════════════════════════
+    # [DEPLOY] binary + frontend → restart → health check
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: Install now binary at /opt/now/now
+      ansible.builtin.copy:
+        src: "{{ now_binary_src }}"
+        dest: "{{ now_app_dir }}/now"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: restart now
+
+    - name: Ensure web root (root:caddy)
+      ansible.builtin.file:
+        path: "{{ now_web_root }}"
+        state: directory
+        owner: root
+        group: caddy
+        mode: "0755"
+
+    # --delete-after: new assets and index.html land before old assets go, so
+    # a page loaded mid-deploy never points at a file that was just removed.
+    - name: Sync frontend to /var/www/now
+      ansible.posix.synchronize:
+        src: "{{ now_web_src }}"
+        dest: "{{ now_web_root }}/"
+        delete: true
+        rsync_opts:
+          - "--delete-after"
+
+    - name: Fix ownership and modes on web root (root:caddy)
+      ansible.builtin.file:
+        path: "{{ now_web_root }}"
+        state: directory
+        recurse: true
+        owner: root
+        group: caddy
+        mode: "u=rwX,g=rX,o=rX"
+
+    - name: Enable and start now
+      ansible.builtin.systemd:
+        name: now
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+
+    - name: Validate Caddy + reload (if site changed)
+      when: now_site_change.changed
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          set -a
+          # shellcheck disable=SC1091
+          source /etc/caddy/cloudflare.env
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          systemctl reload caddy
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Health check (API + database)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ now_internal_port }}/healthz"
+        status_code: 200
+        return_content: true
+      register: health
+      retries: 6
+      delay: 2
+      until: health.status == 200
+
+    - name: Deploy summary
+      ansible.builtin.debug:
+        msg: "Deployed. now.service healthy ({{ health.content }}). https://{{ now_domain }}"
+
+  handlers:
+    - name: daemon reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart now
+      ansible.builtin.systemd:
+        name: now
+        state: restarted

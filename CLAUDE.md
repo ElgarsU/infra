@@ -17,7 +17,8 @@ everything about *how it's deployed* lives here.
   SSR CRF300L maintenance log — standalone, no cross-app deps), **kp** (Next.js
   gym trainer booking/client app — standalone, React not Nuxt), **cat-nest**
   (read-only Viessmann boiler logger + eWeLink room-sensor logger — two
-  standalone Python stdlib services from one repo).
+  standalone Python stdlib services from one repo), **now** (Go API + React
+  SPA personal project planner — standalone, password sign-in).
 - Full live layout: `docs/vps-inventory.md`.
 
 ## Architecture
@@ -88,6 +89,7 @@ spec + reference scripts: `docs/build-sh-contract.md`. Summary:
 | honda | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 | kp | stage clean source → `dist/` | **on the VPS** (`npm ci`/`build` — native `better-sqlite3`) |
 | cat-nest | run unit tests, stage `catnest/` package → `dist/` | n/a (stdlib Python, host `python3`) |
+| now | run tests, Go cross-compile → `dist/now-linux-arm64`, Vite build → `dist/web/` | control node (pure-Go SQLite, no native deps) |
 
 `enduro-tracking` is one repo holding two infra apps (tracker + sentry); its
 single `build.sh` builds sentry. tracker needs no build.
@@ -103,7 +105,7 @@ single `build.sh` builds sentry. tracker needs no build.
 - **Pushover flows to both** tracker (Traccar `notificator.pushover.*`) and sentry
   (`SENTRY_PUSHOVER_*`). One source: `tracker.env`.
 - **Deploy order** (encoded in `setup.sh`): tracker → sentry → husky →
-  discord-scraper → forge → prelander → honda → kp → cat-nest.
+  discord-scraper → forge → prelander → honda → kp → cat-nest → now.
 
 ## Gotchas (preserved from the source repos — keep them)
 

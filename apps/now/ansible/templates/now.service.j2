@@ -1,0 +1,25 @@
+# Managed by infra apps/now/ansible/playbook.yml. Do not edit on the VPS.
+[Unit]
+Description=Now · personal project planner API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ now_user }}
+Group={{ now_user }}
+WorkingDirectory={{ now_data_dir }}
+EnvironmentFile={{ now_app_dir }}/.env
+ExecStart={{ now_app_dir }}/now
+Restart=always
+RestartSec=5
+
+# Sandboxing: the API only writes its SQLite database.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ now_data_dir }}
+
+[Install]
+WantedBy=multi-user.target
